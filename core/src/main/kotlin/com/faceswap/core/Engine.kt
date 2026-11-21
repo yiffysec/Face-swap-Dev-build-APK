@@ -106,8 +106,11 @@ class FaceSwapEngine(
     val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     val detector = FaceDetector(env, files.detector, factory)
     val recognizer = FaceRecognizer(env, files.recognizer, factory)
-    val swapper = FaceSwapper(env, files.swapper, factory, files.emapCache)
-    val policy = ContentPolicy(ContentAnalyser(env, files.contentAnalyser, factory), verifier)
+    // Swapper (~280 MB) and content analyser are loaded on first use, so face import / library work only
+    // needs the detector + recognizer in memory.
+    private val swapperLazy = lazy { FaceSwapper(env, files.swapper, factory, files.emapCache) }
+    val swapper: FaceSwapper by swapperLazy
+    val policy = ContentPolicy({ ContentAnalyser(env, files.contentAnalyser, factory) }, verifier)
     private var enhancerFile = files.enhancer
     private var enhancerModel: FaceEnhancer? = null
     private val factoryRef = factory
@@ -220,6 +223,6 @@ class FaceSwapEngine(
     }
 
     override fun close() {
-        detector.close(); recognizer.close(); swapper.close(); policy.close(); enhancerModel?.close()
+        detector.close(); recognizer.close(); if (swapperLazy.isInitialized()) swapper.close(); policy.close(); enhancerModel?.close()
     }
 }

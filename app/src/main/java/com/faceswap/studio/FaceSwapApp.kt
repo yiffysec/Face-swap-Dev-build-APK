@@ -11,13 +11,17 @@ class FaceSwapApp : Application() {
     lateinit var library: FaceLibrary; private set
     lateinit var settings: SettingsStore; private set
     lateinit var engine: EngineHolder; private set
+    lateinit var tuning: com.faceswap.studio.engine.TuningStore; private set
 
     override fun onCreate() {
         super.onCreate()
+        if (getProcessName().endsWith(":tuner")) return // tuner process only needs the Activity
+        com.faceswap.studio.util.Diagnostics.install(this, BuildConfig.VERSION_NAME)
         models = ModelManager(this)
         library = FaceLibrary(this)
         settings = SettingsStore(this)
-        engine = EngineHolder(models)
+        tuning = com.faceswap.studio.engine.TuningStore(this)
+        engine = EngineHolder(models, tuning)
         // Production: engine.verifier = YourKycVerifier(...)  (see README "Identity verification")
     }
 }

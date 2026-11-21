@@ -67,7 +67,7 @@ kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarg
 
 dependencies {
     implementation(project(":core"))
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.32.0")
 
     val bom = platform("androidx.compose:compose-bom:2026.01.01")
     implementation(bom)
@@ -103,6 +103,8 @@ val fetchModels by tasks.registering {
     description = "Downloads ONNX models (cached) and stages them as APK assets"
     val outDir = layout.buildDirectory.dir("bundled-models/models")
     outputs.dir(outDir)
+    // always re-stage from the cache: tools/prepare_models.py may have rewritten cached models in place
+    outputs.upToDateWhen { false }
     inputs.property("ids", modelIds)
     inputs.property("bundle", bundleModels)
     doLast {

@@ -304,9 +304,25 @@ fun SettingsScreen(vm: AppViewModel) {
         }
 
         SectionTitle("Performance")
+        val ctx = LocalContext.current
+        val tuneSummary by vm.tuningSummary.collectAsState()
+        lateinit var launchTuner: () -> Unit
+        val tuner = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+            if (r.resultCode == com.faceswap.studio.engine.TunerActivity.RESULT_USER_CANCELLED) { vm.onTunerFinished(false); return@rememberLauncherForActivityResult }
+            if (vm.onTunerFinished(r.resultCode == android.app.Activity.RESULT_OK) && vm.beginTuning(fresh = false)) launchTuner()
+        }
+        launchTuner = { tuner.launch(Intent(ctx, com.faceswap.studio.engine.TunerActivity::class.java)) }
+        Button(onClick = { if (vm.beginTuning(fresh = true)) launchTuner() }, modifier = Modifier.fillMaxWidth()) { Text(if (tuneSummary == null) "Tune for this device" else "Re-run device tuning") }
+        Text(tuneSummary ?: "Not tuned yet – Auto uses CPU for every model until you run tuning (takes 2–5 minutes).",
+            Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.bodySmall)
+        Text("Big cores detected: ${com.faceswap.studio.engine.CpuInfo.bigCores} · SoC: ${com.faceswap.studio.engine.socModel()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { Accelerator.entries.forEach { a -> FilterChip(s.accelerator == a, { up { it.copy(accelerator = a) } }, { Text(a.label) }) } }
         SliderRow("CPU threads", s.threads.toFloat(), 1f..8f, { it.toInt().toString() }) { v -> up { it.copy(threads = v.toInt()) } }
-        Text("XNNPACK is the safest fast option. NNAPI can be faster on phones with a strong NPU and falls back to CPU automatically if unsupported.", style = MaterialTheme.typography.bodySmall)
+        Text("Auto uses the fastest backend the tuner verified for each model. Forcing XNNPACK/NNAPI skips that safety check – switch back to Auto or CPU if the app closes.", style = MaterialTheme.typography.bodySmall)
+
+        SectionTitle("Diagnostics")
+        Text("Crash reports are kept on the device only. If the app closes unexpectedly, the report opens automatically on next launch.", style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(onClick = vm::showLastReport, modifier = Modifier.padding(top = 6.dp)) { Text("View last crash report") }
 
         if (vm.internalAvailable) {
             HorizontalDivider(Modifier.padding(vertical = 16.dp))
