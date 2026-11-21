@@ -80,7 +80,8 @@ object Backends {
                         "htp_performance_mode" to "burst",
                         "htp_graph_finalization_optimization_mode" to "3",
                         "enable_htp_fp16_precision" to "1",
-                    ) else mapOf("backend_path" to "libQnnGpu.so"),
+                        "qnn_context_priority" to "high",
+                    ) else mapOf("backend_path" to "libQnnGpu.so", "qnn_context_priority" to "high"),
                 )
             }
         }

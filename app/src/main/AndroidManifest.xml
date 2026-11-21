@@ -20,6 +20,11 @@
 
         <!-- Hexagon DSP RPC library (QNN HTP on Snapdragon); optional so other SoCs still install. -->
         <uses-native-library android:name="libcdsprpc.so" android:required="false" />
+        <!-- OpenCL for LiteRT GPU (Mali/Adreno). Pixel ships its Mali OpenCL as libOpenCL-pixel.so; without these
+             declarations the app namespace can't load them and LiteRT silently falls back to slower OpenGL. -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL-pixel.so" android:required="false" />
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
 
         <activity
             android:name=".MainActivity"
