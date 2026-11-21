@@ -28,9 +28,9 @@ jobs:
       BUNDLE_MODELS: ${{ github.event_name != 'workflow_dispatch' || inputs.bundle_models }}
       BUNDLE_ENHANCER: ${{ github.event_name != 'workflow_dispatch' || inputs.bundle_enhancer }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -61,6 +61,7 @@ jobs:
           if [ ! -f $MODELS_CACHE/ex/target.jpg ]; then
             curl -sL -o $MODELS_CACHE/ex/source.jpg https://huggingface.co/facefusion/examples-3.0.0/resolve/main/source.jpg
             curl -sL -o /tmp/t.mp4 https://huggingface.co/facefusion/examples-3.0.0/resolve/main/target-240p.mp4
+            command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null)
             ffmpeg -loglevel error -y -ss 1 -i /tmp/t.mp4 -frames:v 1 $MODELS_CACHE/ex/target.jpg
           fi
           ./gradlew :core:test -Dmodels.dir=$MODELS_CACHE --console=plain
