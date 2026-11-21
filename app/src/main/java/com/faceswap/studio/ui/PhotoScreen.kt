@@ -105,8 +105,11 @@ fun PhotoScreen(vm: AppViewModel, adders: FaceAdders) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             QualityPreset.entries.forEach { p -> FilterChip(settings.preset == p, { vm.updateSettings { it.copy(preset = p) } }, { Text(p.label) }) }
         }
-        if (settings.preset.enhance && !vm.models.file(com.faceswap.studio.data.ModelRole.ENHANCER).exists())
-            Text("Download GFPGAN in Models to enable face enhancement.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        val enh = settings.enhancerFor(false)
+        if (enh != null && !vm.models.has(enh))
+            Text("Enhancer $enh isn't installed (Models) – results won't be enhanced.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        if (!vm.models.has(settings.swapperId))
+            Text("Swapper ${settings.swapperId} isn't installed – pick another in Settings or install it in Models.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
         Spacer(Modifier.height(14.dp))
         Button(
@@ -131,6 +134,7 @@ fun PhotoScreen(vm: AppViewModel, adders: FaceAdders) {
                 }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.Share, null); Spacer(Modifier.size(6.dp)); Text("Share") }
             }
         }
+        StudioTools(vm)
         Spacer(Modifier.height(24.dp))
     }
 }

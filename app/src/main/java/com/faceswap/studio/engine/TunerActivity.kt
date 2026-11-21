@@ -1,9 +1,5 @@
 package com.faceswap.studio.engine
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
-import ai.onnxruntime.TensorInfo
 import android.app.Activity
 import android.os.Bundle
 import android.view.WindowManager
@@ -25,10 +21,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.faceswap.core.Tensor
 import com.faceswap.studio.data.ModelCatalog
 import com.faceswap.studio.ui.theme.FaceSwapTheme
 import java.io.File
-import java.nio.FloatBuffer
 import kotlin.math.sqrt
 import kotlin.random.Random
 
@@ -82,22 +78,22 @@ class TunerActivity : ComponentActivity() {
 
         val modelsDir = File(filesDir, "models")
         val models = ModelCatalog.all.map { it.id }.filter { File(modelsDir, "$it.onnx").exists() }
-        val total = models.size * Backend.entries.size
-        val env = OrtEnvironment.getEnvironment()
+        val plan = models.associateWith { Backends.candidates(LiteRtModel.available(modelsDir, it)) }
+        val total = plan.values.sumOf { it.size }
         val threads = CpuInfo.bigCores
         val rnd = Random(42)
 
         for (model in models) {
             val file = File(modelsDir, "$model.onnx")
             var reference: FloatArray? = null
-            for (backend in Backend.entries) {
+            for (backend in plan.getValue(model)) {
                 val done = trials.count { it.model in models }
                 ui { progress.value = done.toFloat() / total; headline.value = "$model · ${backend.label}" }
                 val existing = trials.firstOrNull { it.model == model && it.backend == backend }
                 if (existing != null && (backend != Backend.CPU || reference != null || existing.status != "ok")) continue
                 // CPU is always run first (also after a restart) to have a reference output.
                 store.markInProgress(model, backend)
-                val t = runCatching { measure(env, file, backend, threads, rnd, model) }
+                val t = runCatching { measure(file, model, backend, threads, rnd) }
                 store.clearInProgress()
                 val (firstMs, avgMs, out) = t.getOrElse { e ->
                     val tr = Trial(model, backend, "failed: ${e.message?.take(80)}", 0, Double.MAX_VALUE, 0.0)
@@ -136,38 +132,31 @@ class TunerActivity : ComponentActivity() {
     }
 
     /** Returns (first run incl. compilation ms, average steady-state ms, first output). */
-    private fun measure(env: OrtEnvironment, file: File, backend: Backend, threads: Int, rnd: Random, model: String): Triple<Long, Double, FloatArray> {
+    private fun measure(file: File, id: String, backend: Backend, threads: Int, rnd: Random): Triple<Long, Double, FloatArray> {
         val t0 = System.nanoTime()
-        Backends.options(backend, threads).use { opts ->
-            env.createSession(file.absolutePath, opts).use { session ->
-                val inputs = session.inputInfo.mapValues { (name, info) ->
-                    val shape = (info.info as TensorInfo).shape.map { if (it > 0) it else defaultDim(model, name) }.toLongArray()
-                    val n = shape.fold(1L) { a, b -> a * b }.toInt()
-                    val data = FloatArray(n) { rnd.nextFloat() }
-                    if (name.contains("source")) { val s = sqrt(data.sumOf { (it * it).toDouble() }).toFloat(); for (i in data.indices) data[i] /= s }
-                    OnnxTensor.createTensor(env, FloatBuffer.wrap(data), shape)
-                }
-                try {
-                    var out: FloatArray
-                    session.run(inputs).use { out = first(it) }
-                    val first = (System.nanoTime() - t0) / 1_000_000
-                    val runs = if (file.length() > 100_000_000) 3 else 6
-                    val s = System.nanoTime()
-                    repeat(runs) { session.run(inputs).use { } }
-                    return Triple(first, (System.nanoTime() - s) / 1e6 / runs, out)
-                } finally {
-                    inputs.values.forEach { it.close() }
-                }
+        Backends.load(this, id, file, backend, threads).use { model ->
+            val inputs = model.inputNames.associateWith { name ->
+                val shape = (model.inputShape(name) ?: longArrayOf()).map { if (it > 0) it else defaultDim(id) }.toLongArray()
+                val n = shape.fold(1L) { a, b -> a * b }.toInt().coerceAtLeast(1)
+                val data = FloatArray(n) { rnd.nextFloat() }
+                if (name.contains("source") || name.contains("emb")) { val s = sqrt(data.sumOf { (it * it).toDouble() }).toFloat(); for (i in data.indices) data[i] /= s }
+                Tensor(data, shape)
             }
+            val out = model.run(inputs).values.first().data
+            val first = (System.nanoTime() - t0) / 1_000_000
+            val runs = if (file.length() > 100_000_000) 3 else 6
+            val s = System.nanoTime()
+            repeat(runs) { model.run(inputs) }
+            return Triple(first, (System.nanoTime() - s) / 1e6 / runs, out)
         }
     }
 
-    private fun defaultDim(model: String, input: String): Long = if (model.startsWith("scrfd")) 640 else 1
-
-    private fun first(r: OrtSession.Result): FloatArray {
-        val t = r.get(0) as OnnxTensor
-        val fb = t.floatBuffer
-        return FloatArray(fb.remaining()).also { fb.get(it) }
+    private fun defaultDim(model: String): Long = when {
+        model.startsWith("scrfd") || model.startsWith("yunet") -> 640
+        model.startsWith("span") -> 128
+        model.startsWith("real_esrgan") -> 256
+        model.startsWith("modnet") || model.startsWith("bisenet") -> 512
+        else -> 1
     }
 
     private fun cosine(a: FloatArray, b: FloatArray): Double {

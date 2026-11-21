@@ -21,6 +21,6 @@ dependencies {
 tasks.test {
     useJUnit()
     systemProperty("models.dir", System.getProperty("models.dir") ?: (System.getenv("FACESWAP_MODELS") ?: ""))
-    maxHeapSize = "4g"
+    maxHeapSize = "2g"
     testLogging { showStandardStreams = true; events("passed", "failed", "skipped") }
 }

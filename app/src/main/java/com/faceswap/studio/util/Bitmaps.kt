@@ -55,10 +55,10 @@ object Bitmaps {
         return Bitmap.createScaledBitmap(crop, size, size, true)
     }
 
-    fun saveToGallery(context: Context, bmp: Bitmap, name: String = "faceswap_${System.currentTimeMillis()}"): Uri? {
+    fun saveToGallery(context: Context, bmp: Bitmap, name: String = "faceswap_${System.currentTimeMillis()}", png: Boolean = false): Uri? {
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "$name.jpg")
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.DISPLAY_NAME, if (png) "$name.png" else "$name.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, if (png) "image/png" else "image/jpeg")
             if (Build.VERSION.SDK_INT >= 29) {
                 put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/FaceSwapStudio")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -66,7 +66,7 @@ object Bitmaps {
         }
         val resolver = context.contentResolver
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
-        resolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 96, it) }
+        resolver.openOutputStream(uri)?.use { bmp.compress(if (png) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 96, it) }
         if (Build.VERSION.SDK_INT >= 29) {
             values.clear(); values.put(MediaStore.Images.Media.IS_PENDING, 0)
             resolver.update(uri, values, null, null)

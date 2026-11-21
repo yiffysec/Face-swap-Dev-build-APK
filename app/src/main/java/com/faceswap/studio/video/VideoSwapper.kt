@@ -53,8 +53,16 @@ class VideoSwapper(private val context: Context) {
         config: SwapConfig,
         maxSide: Int,
         keepAudio: Boolean,
+        workers: Int = 2,
+        perf: com.faceswap.studio.engine.PerformanceManager? = null,
         onProgress: (VideoProgress) -> Unit,
     ): VideoResult = withContext(Dispatchers.Default) {
+        // Render workers: swapping/enhancing N frames in parallel while this thread keeps decoding + detecting.
+        val tids = java.util.Collections.synchronizedList(ArrayList<Int>())
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(workers.coerceIn(1, 4)) { r ->
+            Thread({ tids += android.os.Process.myTid(); android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY); r.run() }, "swap-worker")
+        }
+        val pending = ArrayDeque<Triple<Long, java.util.concurrent.Future<RgbImage>, Int>>()
         val t0 = System.currentTimeMillis()
         val extractor = MediaExtractor().apply { setDataSource(context, input, null) }
         var decoder: MediaCodec? = null
@@ -151,6 +159,17 @@ class VideoSwapper(private val context: Context) {
             }
 
             var lastPts = 0L
+            var perfStarted = false
+            fun flush(all: Boolean) {
+                while (pending.isNotEmpty() && (all || pending.size > workers || pending.first().second.isDone)) {
+                    val (pts, fut, swapped) = pending.removeFirst()
+                    val tf = System.currentTimeMillis()
+                    val outFrame = Yuv.rotate(fut.get(), (360 - rotation) % 360)
+                    queueToEncoder(outFrame, pts, false)
+                    swappedTotal += swapped
+                    perf?.report(System.currentTimeMillis() - tf)
+                }
+            }
             while (!encoderDone) {
                 coroutineContext.ensureActive()
                 if (!inputDone) {
@@ -173,20 +192,23 @@ class VideoSwapper(private val context: Context) {
                             var f = if (decoded.width != outW || decoded.height != outH) ImageOps.resize(decoded, outW, outH) else decoded
                             f = Yuv.rotate(f, rotation) // upright for detection
                             if (frameNo % checkEvery == 0) explicit = engine.policy.isExplicit(f)
-                            val r = engine.process(f, mappings, config, tracker, explicitOverride = explicit)
-                            swappedTotal += r.facesSwapped
-                            val outFrame = Yuv.rotate(r.image, (360 - rotation) % 360)
-                            queueToEncoder(outFrame, pts, false)
+                            val upright = f
+                            val plan = engine.analyze(upright, mappings, config, tracker, explicitOverride = explicit)
+                            val fut = pool.submit<RgbImage> { engine.render(upright, plan, config) }
+                            pending.addLast(Triple(pts, fut, plan.assignments.size))
+                            if (!perfStarted && tids.isNotEmpty()) { perf?.begin(null, tids.toList() + android.os.Process.myTid(), 1000L / fps.coerceAtLeast(1), false); perfStarted = true }
+                            flush(false)
                             lastPts = pts
                             frameNo++
                             if (frameNo % 10 == 1) {
                                 val el = (System.currentTimeMillis() - t0) / 1000f
                                 val rate = frameNo / max(0.001f, el)
+                                val preview = runCatching { fut.get() }.getOrNull() ?: upright
                                 onProgress(VideoProgress(frameNo, totalFrames, rate, ((totalFrames - frameNo) / max(0.01f, rate)).roundToInt(), swappedTotal,
-                                    Bitmaps.toBitmap(ImageOps.resize(r.image, r.image.width / 2, r.image.height / 2))))
+                                    Bitmaps.toBitmap(ImageOps.resize(preview, preview.width / 2, preview.height / 2))))
                             }
                         }
-                        if (eos) { decoderDone = true; queueToEncoder(null, lastPts, true) }
+                        if (eos) { flush(true); decoderDone = true; queueToEncoder(null, lastPts, true) }
                     }
                 }
                 drainEncoder(decoderDone)
@@ -212,6 +234,8 @@ class VideoSwapper(private val context: Context) {
             onProgress(VideoProgress(frameNo, frameNo, 0f, 0, swappedTotal, null))
             VideoResult(output, frameNo, (System.currentTimeMillis() - t0) / 1000f, audioCopied)
         } finally {
+            pool.shutdownNow()
+            perf?.end(null)
             runCatching { decoder?.stop() }; runCatching { decoder?.release() }
             runCatching { encoder?.stop() }; runCatching { encoder?.release() }
             runCatching { if (muxerStarted) muxer?.stop() }; runCatching { muxer?.release() }

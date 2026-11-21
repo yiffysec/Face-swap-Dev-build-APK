@@ -3,15 +3,10 @@ name: Build APK
 on:
   push:
     branches: [ "**" ]
-  pull_request:
   workflow_dispatch:
     inputs:
-      bundle_models:
-        description: "Bundle ONNX models into the APK (offline devices)"
-        type: boolean
-        default: true
-      bundle_enhancer:
-        description: "Include optional GFPGAN enhancer (+340 MB)"
+      convert_tflite:
+        description: "Convert models to TFLite (LiteRT GPU twins)"
         type: boolean
         default: true
 
@@ -19,16 +14,23 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write   # publish the rolling "internal" release (APKs + offline model packs)
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       MODELS_CACHE: ${{ github.workspace }}/.models-cache
-      BUNDLE_MODELS: ${{ github.event_name != 'workflow_dispatch' || inputs.bundle_models }}
-      BUNDLE_ENHANCER: ${{ github.event_name != 'workflow_dispatch' || inputs.bundle_enhancer }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
+
+      - name: Free disk space (models + TF need room)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h /
 
       - uses: actions/setup-java@v5
         with:
@@ -41,11 +43,12 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Cache ONNX models
+      - name: Cache models (ONNX + prepared + TFLite twins)
         uses: actions/cache@v4
         with:
           path: .models-cache
-          key: onnx-models-facefusion-3.0.0-static-v2
+          key: models-v4-${{ hashFiles('tools/*.py') }}
+          restore-keys: models-v4-
 
       - name: Write local.properties
         env:
@@ -54,11 +57,22 @@ jobs:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           if [ -n "$DEV_PASSPHRASE" ]; then echo "DEV_PASSPHRASE=$DEV_PASSPHRASE" >> local.properties; fi
 
-      - name: Download + prepare models (static shapes for NPU offload)
+      - name: Download all models
+        run: ./gradlew :app:fetchModels :app:fetchExtraModels --console=plain
+
+      - name: Prepare models (static shapes for NPU offload)
         run: |
-          ./gradlew :app:fetchModels -PbundleModels=true -PbundleEnhancer=$BUNDLE_ENHANCER --console=plain
           pip install -q onnx onnxruntime
           python3 tools/prepare_models.py $MODELS_CACHE
+
+      - name: Convert to TFLite for LiteRT GPU (best effort)
+        if: github.event_name != 'workflow_dispatch' || inputs.convert_tflite
+        continue-on-error: true
+        timeout-minutes: 60
+        run: |
+          pip install -q "tensorflow-cpu" tf_keras onnx2tf onnx_graphsurgeon sng4onnx psutil ai-edge-litert
+          python3 tools/convert_tflite.py $MODELS_CACHE 2>/dev/null | grep -vE "W:onnx|WARNING" | tee tflite-report.txt
+          ls -la $MODELS_CACHE/*.tflite || true
 
       - name: Core unit tests (real models)
         run: |
@@ -71,13 +85,38 @@ jobs:
           fi
           ./gradlew :core:test -Dmodels.dir=$MODELS_CACHE --console=plain
 
-      - name: Build internal (debug) APK
-        run: ./gradlew :app:assembleDebug -PbundleModels=$BUNDLE_MODELS -PbundleEnhancer=$BUNDLE_ENHANCER --console=plain
+      - name: Build internal APKs (universal + snapdragon)
+        run: ./gradlew :app:assembleUniversalDebug :app:assembleSnapdragonDebug --console=plain
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: FaceSwapStudio-internal-${{ github.sha }}
-          path: app/build/outputs/apk/debug/*.apk
-          compression-level: 0
-          retention-days: 14
+      - name: Build offline model packs
+        run: |
+          mkdir -p packs
+          cd $MODELS_CACHE
+          pack() { name=$1; shift; files=""; for id in "$@"; do for f in $id.onnx $id.tflite $id.tflite.json; do [ -f "$f" ] && files="$files $f"; done; done; [ -n "$files" ] && zip -0 -q $GITHUB_WORKSPACE/packs/$name.zip $files; }
+          pack models-swappers inswapper_128_fp16 hyperswap_1b_256 hyperswap_1c_256
+          pack models-enhancers gfpgan_1.4 gpen_bfr_512 restoreformer_plus_plus codeformer
+          pack models-studio fran u2netp real_esrgan_x4_fp16 live_portrait_feature_extractor live_portrait_motion_extractor live_portrait_generator live_portrait_stitcher live_portrait_eye_retargeter live_portrait_lip_retargeter
+          pack models-live MobileFaceSwapUNetRuntime BuildFaceSwap mobilefaceswap_arcface
+          ls -la $GITHUB_WORKSPACE/packs
+
+      - name: Publish rolling internal release
+        run: |
+          BRANCH="${GITHUB_REF_NAME//\//-}"
+          TAG="internal-$BRANCH"
+          mkdir -p out
+          cp app/build/outputs/apk/universal/debug/*.apk out/FaceSwapStudio-universal-$BRANCH.apk
+          cp app/build/outputs/apk/snapdragon/debug/*.apk out/FaceSwapStudio-snapdragon-$BRANCH.apk
+          NOTES="Internal build of $BRANCH @ ${GITHUB_SHA::7}. universal = Pixel 8 Pro (LiteRT GPU / NNAPI / XNNPACK). snapdragon = Galaxy S24 Ultra (QNN HTP NPU). Model packs: import via Models → Import (USB, offline)."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$NOTES" --prerelease
+          else
+            gh release create "$TAG" --title "Internal – $BRANCH" --notes "$NOTES" --prerelease --target "$GITHUB_SHA"
+          fi
+          gh release upload "$TAG" out/*.apk --clobber
+          # model packs rarely change: only upload the ones the release doesn't have yet
+          existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for p in packs/*.zip; do
+            n=$(basename $p)
+            echo "$existing" | grep -qx "$n" || gh release upload "$TAG" "$p"
+          done
+          [ -f tflite-report.txt ] && gh release upload "$TAG" tflite-report.txt --clobber || true

@@ -51,6 +51,9 @@ data class SwapSetup(
 data class PhotoState(
     val target: Bitmap? = null,
     val result: Bitmap? = null,
+    /** Undo stack for studio tools (previous results). */
+    val history: List<Bitmap> = emptyList(),
+    val toolBusy: String? = null,
     val showOriginal: Boolean = false,
     val busy: Boolean = false,
     val status: String? = null,
@@ -104,6 +107,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingCapture: File? = null
 
     val internalAvailable = InternalTesting.AVAILABLE
+    val rootAvailable get() = a.perf.rootAvailable
 
     init {
         viewModelScope.launch { library.load() }
@@ -346,10 +350,130 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toggleOriginal() = _photo.update { it.copy(showOriginal = !it.showOriginal) }
 
+    // ---------------------------------------------------------------- studio tools (FaceFusion processors)
+    sealed class StudioOp(val label: String) {
+        data class Age(val current: Float, val target: Float) : StudioOp("Changing age…")
+        data class Background(val mode: com.faceswap.core.Processors.Background) : StudioOp("Processing background…")
+        data class Upscale(val modelId: String) : StudioOp("Upscaling…")
+        data class Edit(val edit: com.faceswap.core.Processors.FaceEdit) : StudioOp("Editing face…")
+        data class Enhance(val modelId: String) : StudioOp("Enhancing faces…")
+    }
+
+    val photoHasAlpha = MutableStateFlow(false)
+
+    fun applyStudio(op: StudioOp) {
+        val base = _photo.value.result ?: _photo.value.target ?: return
+        viewModelScope.launch {
+            _photo.update { it.copy(toolBusy = op.label, status = null) }
+            Diagnostics.crumb("studio: $op")
+            try {
+                val e = engine()
+                val s = settings.value
+                val out = withContext(Dispatchers.Default) {
+                    val rgb = Bitmaps.toRgb(base)
+                    val faces by lazy { e.detect(rgb, s.toConfig()) }
+                    when (op) {
+                        is StudioOp.Age -> faces.fold(rgb) { img, f -> e.processors.modifyAge(img, f, op.current, op.target, s.maskBlur) }
+                        is StudioOp.Background -> e.processors.replaceBackground(rgb, op.mode)
+                        is StudioOp.Upscale -> e.processors.enhanceFrame(rgb, op.modelId)
+                        is StudioOp.Edit -> faces.fold(rgb) { img, f -> e.processors.editFace(img, f, op.edit, s.maskBlur) }
+                        is StudioOp.Enhance -> {
+                            enhanceAll(e, rgb, faces, op.modelId, s)
+                        }
+                    }
+                }
+                photoHasAlpha.value = op is StudioOp.Background && op.mode is com.faceswap.core.Processors.Background.Transparent
+                _photo.update { it.copy(result = Bitmaps.toBitmap(out), history = (it.history + base).takeLast(8), toolBusy = null, showOriginal = false, savedUri = null) }
+                // heavy processors (FRAN 1 GB+ of activations, LivePortrait) are unloaded right away
+                if (op is StudioOp.Age || op is StudioOp.Edit || op is StudioOp.Upscale) a.engine.trim()
+            } catch (t: Throwable) {
+                Diagnostics.crumb("studio failed: $t")
+                _photo.update { it.copy(toolBusy = null, status = "Error: ${t.message}") }
+            }
+        }
+    }
+
+    private fun enhanceAll(e: com.faceswap.core.FaceSwapEngine, rgb: RgbImage, faces: List<com.faceswap.core.Face>, id: String, s: AppSettings): RgbImage {
+        // enhance only (no swap): run the restorer directly on each detected face
+        if (faces.isEmpty()) return rgb
+        val out = rgb.copy()
+        val enh = e.restorer(id)
+        for (f in faces) {
+            val m = com.faceswap.core.Geometry.estimateSimilarity(f.landmarks, enh.template, enh.size.toFloat())
+            val crop = com.faceswap.core.ImageOps.warpAffine(out, m, enh.size, enh.size)
+            val mixed = com.faceswap.core.ImageOps.mix(crop, enh.enhance(crop, s.codeformerFidelity), s.enhanceBlend)
+            com.faceswap.core.ImageOps.pasteBack(out, mixed, com.faceswap.core.ImageOps.boxMask(enh.size, enh.size, 0.3f), m)
+        }
+        return out
+    }
+
+    fun undoStudio() = _photo.update { st ->
+        if (st.history.isEmpty()) st else st.copy(result = st.history.last(), history = st.history.dropLast(1))
+    }
+
+    /** Use the current result as the next target (chain swaps / tools). */
+    fun resultAsTarget() {
+        val r = _photo.value.result ?: return
+        viewModelScope.launch {
+            photoTargetRgb = Bitmaps.toRgb(r)
+            val faces = detectTargets(photoTargetRgb!!)
+            _photo.update { it.copy(target = r, result = null, history = emptyList(), setup = it.setup.copy(targetFaces = faces, assignments = emptyMap())) }
+        }
+    }
+
+    // ---------------------------------------------------------------- live preview (MobileFaceSwap)
+    data class LiveState(val ready: Boolean = false, val fps: Float = 0f, val faces: Int = 0, val message: String? = null, val frame: Bitmap? = null)
+    private val _live = MutableStateFlow(LiveState()); val live = _live.asStateFlow()
+    private var liveIdentity: com.faceswap.core.MobileFaceSwap.Identity? = null
+    private var liveSources: List<SourceFace> = emptyList()
+    private var liveFrames = 0
+    private var liveExplicit = false
+    private var liveT0 = 0L
+
+    fun liveAvailable() = models.has(com.faceswap.core.ModelIds.MFS_RUNTIME) && models.has(com.faceswap.core.ModelIds.MFS_BUILDER) && models.has(com.faceswap.core.ModelIds.MFS_ARCFACE)
+
+    /** Builds the MobileFaceSwap identity from the selected library face's thumbnail. */
+    fun prepareLive(faceId: String) = viewModelScope.launch {
+        _live.value = LiveState(message = "Preparing identity…")
+        try {
+            val e = engine()
+            val lf = library.faces.value.firstOrNull { it.id == faceId } ?: error("Face not found")
+            val id = withContext(Dispatchers.Default) {
+                val photo = (lf.photoFile ?: lf.thumbFile).let { Bitmaps.decodeFile(it) } ?: error("Missing face image")
+                val rgb = Bitmaps.toRgb(photo)
+                val f = e.detect(rgb, settings.value.toConfig()).maxByOrNull { it.area } ?: error("No face in library image")
+                e.mobileFaceSwap()?.buildIdentity(rgb, f) ?: error("Live preview models not installed")
+            }
+            liveIdentity = id; liveSources = listOf(lf.toSource()); liveFrames = 0; liveT0 = System.currentTimeMillis()
+            _live.value = LiveState(ready = true)
+        } catch (t: Throwable) {
+            _live.value = LiveState(message = t.message ?: "Could not start live preview")
+        }
+    }
+
+    fun stopLive() { liveIdentity = null; _live.value = LiveState() }
+
+    /** Called from the camera analyzer thread. Returns the processed frame (or the input if not ready). */
+    fun processLiveFrame(rgb: RgbImage): RgbImage {
+        val id = liveIdentity ?: return rgb
+        val e = runCatching { kotlinx.coroutines.runBlocking { engine() } }.getOrNull() ?: return rgb
+        if (liveFrames % 30 == 0) liveExplicit = runCatching { e.policy.isExplicit(rgb) }.getOrDefault(false)
+        liveFrames++
+        val decision = e.policy.evaluate(liveExplicit, liveSources)
+        if (!decision.allowed) { _live.update { it.copy(message = policyMessage(decision)) }; return rgb }
+        val cfg = settings.value.toConfig().copy(detectorSize = 320, landmarks68 = false)
+        val faces = e.detect(rgb, cfg)
+        e.previewSwap(rgb, faces, id, settings.value.maskBlur)
+        val el = (System.currentTimeMillis() - liveT0).coerceAtLeast(1)
+        if (liveFrames % 5 == 0) _live.update { it.copy(fps = liveFrames * 1000f / el, faces = faces.size, message = null) }
+        if (liveFrames > 300) { liveFrames = 0; liveT0 = System.currentTimeMillis() }
+        return rgb
+    }
+
     fun savePhoto() {
         val bmp = _photo.value.result ?: return
         viewModelScope.launch {
-            val uri = withContext(Dispatchers.IO) { Bitmaps.saveToGallery(getApplication(), bmp) }
+            val uri = withContext(Dispatchers.IO) { Bitmaps.saveToGallery(getApplication(), bmp, png = photoHasAlpha.value) }
             _photo.update { it.copy(savedUri = uri) }
             toast(if (uri != null) "Saved to Pictures/FaceSwapStudio" else "Save failed")
         }
@@ -397,7 +521,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val e = engine()
                 _video.update { it.copy(status = null) }
-                val r = VideoSwapper(getApplication()).run(e, uri, out, mappings, s.toConfig(forVideo = true), s.videoMaxSide, s.keepAudio) { p ->
+                if (s.rootBoost) a.perf.begin(null, emptyList(), 33, useRoot = true)
+                val r = VideoSwapper(getApplication()).run(e, uri, out, mappings, s.toConfig(forVideo = true), s.videoMaxSide, s.keepAudio, s.videoWorkers, a.perf) { p ->
                     _video.update { it.copy(progress = p) }
                 }
                 val swapped = _video.value.progress?.facesSwapped ?: 0
@@ -412,6 +537,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 Diagnostics.crumb("video: failed $t")
                 out.delete(); _video.update { it.copy(running = false, status = "Error: ${t.message}") }
             } finally {
+                a.perf.end(null)
                 _keepScreenOn.value = false
             }
         }

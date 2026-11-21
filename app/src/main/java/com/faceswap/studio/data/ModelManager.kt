@@ -15,36 +15,78 @@ import java.net.URL
 import java.util.zip.CRC32
 import kotlin.coroutines.coroutineContext
 
-enum class ModelRole { DETECTOR, RECOGNIZER, SWAPPER, ANALYSER, ENHANCER }
+enum class ModelGroup(val title: String) {
+    REQUIRED("Required"), RECOMMENDED("Recommended"), SWAPPERS("Extra swappers"), ENHANCERS("Face enhancers"),
+    STUDIO("Studio tools"), LIVE("Live preview"),
+}
 
 data class ModelSpec(
     val id: String,
     val title: String,
     val description: String,
-    val role: ModelRole,
+    val group: ModelGroup,
     val sizeBytes: Long,
-    val required: Boolean,
     val license: String,
+    /** Download URL of the .onnx file. */
+    val url: String,
+    /** CRC32 .hash URL (FaceFusion mirrors only). */
+    val hashUrl: String? = null,
+    /** Bundled into the APK by default (see app/build.gradle.kts "core" set). */
+    val core: Boolean = false,
 ) {
     val fileName get() = "$id.onnx"
-    val url get() = "$BASE/$id.onnx"
-    val hashUrl get() = "$BASE/$id.hash"
+    val required get() = group == ModelGroup.REQUIRED
 
     companion object {
-        /** Open model mirror maintained by the FaceFusion project on Hugging Face. */
-        const val BASE = "https://huggingface.co/facefusion/models-3.0.0/resolve/main"
+        private fun ff(release: String, id: String) = "https://huggingface.co/facefusion/models-$release/resolve/main/$id"
+        fun facefusion(release: String, id: String, title: String, desc: String, group: ModelGroup, size: Long, license: String, core: Boolean = false) =
+            ModelSpec(id, title, desc, group, size, license, ff(release, "$id.onnx"), ff(release, "$id.hash"), core)
     }
 }
 
 object ModelCatalog {
-    val all = listOf(
-        ModelSpec("scrfd_2.5g", "SCRFD 2.5G", "Fast, accurate face + landmark detector", ModelRole.DETECTOR, 3_295_067, true, "InsightFace – non-commercial research"),
-        ModelSpec("arcface_w600k_r50", "ArcFace R50", "Identity embeddings (matching, library, mapping)", ModelRole.RECOGNIZER, 174_388_474, true, "InsightFace – non-commercial research"),
-        ModelSpec("inswapper_128_fp16", "InSwapper 128 (fp16)", "The face swapping model", ModelRole.SWAPPER, 277_680_829, true, "InsightFace – non-commercial research"),
-        ModelSpec("open_nsfw", "Content analyser", "Target content classification for the identity policy", ModelRole.ANALYSER, 23_598_282, true, "BSD-2 (Yahoo open_nsfw)"),
-        ModelSpec("gfpgan_1.4", "GFPGAN 1.4", "Optional face restoration – sharper, more detailed faces", ModelRole.ENHANCER, 340_299_087, false, "Apache-2.0 (TencentARC)"),
+    private const val MFS = "https://huggingface.co/ZZZHHHHW/mobilefaceswap/resolve/main"
+    private val R = ModelGroup.REQUIRED; private val REC = ModelGroup.RECOMMENDED
+
+    val all: List<ModelSpec> = listOf(
+        ModelSpec.facefusion("3.4.0", "yunet_2023_mar", "YuNet", "Fast face detector (default)", R, 232_475, "MIT", core = true),
+        ModelSpec.facefusion("3.0.0", "scrfd_2.5g", "SCRFD 2.5G", "Alternative face detector", R, 3_295_067, "Non-commercial", core = true),
+        ModelSpec.facefusion("3.0.0", "arcface_w600k_r50", "ArcFace R50", "Identity embeddings", R, 174_388_474, "Non-commercial", core = true),
+        ModelSpec.facefusion("3.3.0", "hyperswap_1a_256", "HyperSwap 1a", "Default face swapper – 256px, sharp, fast, built-in mask", R, 402_700_000, "ResearchRAIL", core = true),
+        ModelSpec.facefusion("3.0.0", "open_nsfw", "Content analyser", "Target content classification for the identity policy", R, 23_598_282, "BSD-2", core = true),
+
+        ModelSpec.facefusion("3.9.0", "hrffa", "HRFFA landmarks", "68-point landmarks – better alignment, area masks, face editor", REC, 35_800_000, "MIT", core = true),
+        ModelSpec.facefusion("3.1.0", "bisenet_resnet_18", "BiSeNet face parser", "Region/occlusion masks – keeps hair, hands, glasses", REC, 53_200_000, "MIT", core = true),
+        ModelSpec.facefusion("3.0.0", "gpen_bfr_256", "GPEN-BFR 256", "Default face enhancer – 7× faster than GFPGAN", REC, 75_800_000, "Non-commercial", core = true),
+        ModelSpec.facefusion("3.5.0", "modnet", "MODNet", "Background removal / blur / replace (portrait matting)", REC, 25_900_000, "Apache-2.0", core = true),
+        ModelSpec.facefusion("3.0.0", "span_kendata_x4", "SPAN ×4", "Tiny, fast 4× photo upscaler", REC, 1_700_000, "Non-commercial", core = true),
+        ModelSpec.facefusion("3.0.0", "real_esrgan_x2_fp16", "Real-ESRGAN ×2", "High-quality 2× upscaler", REC, 36_100_000, "BSD-3", core = true),
+
+        ModelSpec.facefusion("3.0.0", "inswapper_128_fp16", "InSwapper 128", "Classic swapper – strongest likeness, use with pixel boost", ModelGroup.SWAPPERS, 277_680_829, "Non-commercial"),
+        ModelSpec.facefusion("3.3.0", "hyperswap_1b_256", "HyperSwap 1b", "HyperSwap variant", ModelGroup.SWAPPERS, 402_700_000, "ResearchRAIL"),
+        ModelSpec.facefusion("3.3.0", "hyperswap_1c_256", "HyperSwap 1c", "HyperSwap variant", ModelGroup.SWAPPERS, 402_700_000, "ResearchRAIL"),
+
+        ModelSpec.facefusion("3.0.0", "gfpgan_1.4", "GFPGAN 1.4", "Classic 512px face restoration", ModelGroup.ENHANCERS, 340_299_087, "Apache-2.0"),
+        ModelSpec.facefusion("3.0.0", "gpen_bfr_512", "GPEN-BFR 512", "512px GPEN restoration", ModelGroup.ENHANCERS, 284_300_000, "Non-commercial"),
+        ModelSpec.facefusion("3.0.0", "restoreformer_plus_plus", "RestoreFormer++", "Detail-rich restoration", ModelGroup.ENHANCERS, 294_300_000, "Apache-2.0"),
+        ModelSpec.facefusion("3.0.0", "codeformer", "CodeFormer", "Restoration with fidelity control", ModelGroup.ENHANCERS, 377_000_000, "S-Lab (non-commercial)"),
+
+        ModelSpec.facefusion("3.6.0", "fran", "FRAN age", "Age modifier (photos)", ModelGroup.STUDIO, 130_800_000, "MIT"),
+        ModelSpec.facefusion("3.5.0", "u2netp", "U²-Netp", "Tiny background-removal fallback", ModelGroup.STUDIO, 4_600_000, "Apache-2.0"),
+        ModelSpec.facefusion("3.0.0", "real_esrgan_x4_fp16", "Real-ESRGAN ×4", "High-quality 4× upscaler", ModelGroup.STUDIO, 36_100_000, "BSD-3"),
+        ModelSpec.facefusion("3.0.0", "live_portrait_feature_extractor", "LivePortrait features", "Expression restorer / face editor", ModelGroup.STUDIO, 3_400_000, "MIT"),
+        ModelSpec.facefusion("3.0.0", "live_portrait_motion_extractor", "LivePortrait motion", "Expression restorer / face editor", ModelGroup.STUDIO, 112_600_000, "MIT"),
+        ModelSpec.facefusion("3.0.0", "live_portrait_generator", "LivePortrait generator", "Expression restorer / face editor", ModelGroup.STUDIO, 222_300_000, "MIT"),
+        ModelSpec.facefusion("3.0.0", "live_portrait_stitcher", "LivePortrait stitcher", "Face editor", ModelGroup.STUDIO, 193_300, "MIT"),
+        ModelSpec.facefusion("3.0.0", "live_portrait_eye_retargeter", "LivePortrait eyes", "Face editor – eye open/close", ModelGroup.STUDIO, 581_400, "MIT"),
+        ModelSpec.facefusion("3.0.0", "live_portrait_lip_retargeter", "LivePortrait lips", "Face editor – lip open/close", ModelGroup.STUDIO, 151_000, "MIT"),
+
+        ModelSpec("MobileFaceSwapUNetRuntime", "MobileFaceSwap runtime", "Real-time camera preview swapper (364 KB)", ModelGroup.LIVE, 364_176, "Apache-2.0", "$MFS/MobileFaceSwapUNetRuntime.onnx"),
+        ModelSpec("BuildFaceSwap", "MobileFaceSwap builder", "Builds per-identity weights (once per face)", ModelGroup.LIVE, 82_512_085, "Apache-2.0", "$MFS/BuildFaceSwap.onnx"),
+        ModelSpec("mobilefaceswap_arcface", "MobileFaceSwap ArcFace", "Identity encoder for the preview swapper", ModelGroup.LIVE, 209_111_421, "Apache-2.0", "$MFS/arcface.onnx"),
     )
-    fun byRole(role: ModelRole) = all.first { it.role == role }
+
+    fun byId(id: String) = all.firstOrNull { it.id == id }
 }
 
 sealed class ModelState {
@@ -69,7 +111,10 @@ class ModelManager(private val context: Context) {
     private fun initial(spec: ModelSpec) = if (file(spec).exists()) ModelState.Ready else ModelState.Missing
 
     fun file(spec: ModelSpec) = File(dir, spec.fileName)
-    fun file(role: ModelRole) = file(ModelCatalog.byRole(role))
+    fun file(id: String) = File(dir, "$id.onnx")
+    fun has(id: String) = file(id).exists()
+    /** Optional TFLite twin of a model (for the LiteRT GPU backend), produced by CI conversion. */
+    fun tflite(id: String) = File(dir, "$id.tflite").takeIf { it.exists() }
 
     val requiredReady get() = ModelCatalog.all.filter { it.required }.all { file(it).exists() }
     val missingRequiredBytes get() = ModelCatalog.all.filter { it.required && !file(it).exists() }.sumOf { it.sizeBytes }
@@ -78,7 +123,8 @@ class ModelManager(private val context: Context) {
 
     fun delete(spec: ModelSpec) {
         file(spec).delete(); File(dir, spec.fileName + ".part").delete()
-        if (spec.role == ModelRole.SWAPPER) emapCache.delete()
+        if (spec.id.startsWith("inswapper")) emapCache.delete()
+        File(dir, "${spec.id}.tflite").delete()
         set(spec.id, ModelState.Missing)
     }
 
@@ -87,7 +133,7 @@ class ModelManager(private val context: Context) {
         val target = file(spec)
         val part = File(dir, spec.fileName + ".part")
         try {
-            val expectedHash = runCatching { fetchText(spec.hashUrl).trim().lowercase() }.getOrNull()
+            val expectedHash = spec.hashUrl?.let { u -> runCatching { fetchText(u).trim().lowercase() }.getOrNull() }
             var downloaded = if (part.exists()) part.length() else 0L
             var total = spec.sizeBytes
             var url = URL(spec.url)
@@ -144,6 +190,11 @@ class ModelManager(private val context: Context) {
     /** Copies models bundled in the APK into app storage (first launch / after update). Idempotent. */
     suspend fun installBundled() = withContext(Dispatchers.IO) {
         val bundled = context.assets.list("models")?.toSet() ?: return@withContext
+        // TFLite twins first (silent), then ONNX models
+        for (name in bundled.filter { it.endsWith(".tflite") }) {
+            val f = File(dir, name)
+            if (!f.exists()) runCatching { context.assets.open("models/$name").use { i -> File(dir, "$name.part").outputStream().use { i.copyTo(it, 1 shl 20) } }; File(dir, "$name.part").renameTo(f) }
+        }
         for (spec in ModelCatalog.all) {
             if (spec.fileName !in bundled || file(spec).exists()) continue
             set(spec.id, ModelState.Installing)
@@ -172,7 +223,8 @@ class ModelManager(private val context: Context) {
                 context.contentResolver.openInputStream(uri)!!.use { input -> part.outputStream().use { input.copyTo(it, 1 shl 20) } }
                 file(spec).delete()
                 check(part.renameTo(file(spec)))
-                if (spec.role == ModelRole.SWAPPER) emapCache.delete()
+                if (spec.id.startsWith("inswapper")) emapCache.delete()
+        File(dir, "${spec.id}.tflite").delete()
                 set(spec.id, ModelState.Ready); done += spec.fileName
             } catch (t: Throwable) {
                 set(spec.id, ModelState.Failed("Import failed: ${t.message}"))

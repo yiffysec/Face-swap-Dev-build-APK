@@ -1,6 +1,5 @@
 package com.faceswap.core
 
-import ai.onnxruntime.OrtSession
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.awt.image.BufferedImage
@@ -27,89 +26,169 @@ class PipelineTest {
     }
 
     private fun save(img: RgbImage, name: String) {
-        val bi = BufferedImage(img.width, img.height, BufferedImage.TYPE_INT_RGB)
+        val alpha = img.pixels.any { (it ushr 24) != 0xFF }
+        val bi = BufferedImage(img.width, img.height, if (alpha) BufferedImage.TYPE_INT_ARGB else BufferedImage.TYPE_INT_RGB)
         bi.setRGB(0, 0, img.width, img.height, img.pixels, 0, img.width)
         ImageIO.write(bi, "png", File(out, name))
     }
 
-    private val factory = SessionFactory { env, path ->
-        env.createSession(path, OrtSession.SessionOptions().apply { setIntraOpNumThreads(4) })
+    private fun has(id: String) = File(dir, "$id.onnx").exists()
+    private fun ready() = has(ModelIds.ARCFACE) && File(dir, "ex/source.jpg").exists() && File(dir, "ex/target.jpg").exists()
+
+    private fun engine(verifier: IdentityVerifier = NoIdentityVerifier): FaceSwapEngine {
+        val loader = OrtModel.cpuLoader(4)
+        return FaceSwapEngine({ id -> File(dir, "$id.onnx") }, { _, f -> loader.load(f) }, verifier, File(out, "emap.bin"))
     }
 
-    private fun engine(verifier: IdentityVerifier = NoIdentityVerifier) = FaceSwapEngine(
-        ModelFiles(
-            File(dir, "scrfd_2.5g.onnx"), File(dir, "arcface_w600k_r50.onnx"), File(dir, "inswapper_128_fp16.onnx"),
-            File(dir, "open_nsfw.onnx"), File(dir, "gfpgan_1.4.onnx"), File(out, "emap.bin"),
-        ), factory, verifier,
-    )
+    private val src by lazy { load(File(dir, "ex/source.jpg")) }
+    private val tgt by lazy { load(File(dir, "ex/target.jpg")) }
+
+    private fun identityAfter(e: FaceSwapEngine, img: RgbImage, source: SourceFace) =
+        Geometry.cosine(source.averaged, e.recognizer.embed(img, e.detect(img, SwapConfig(landmarks68 = false)).maxBy { it.area }))
 
     @Test
     fun emapMatchesReference() {
-        assumeTrue(File(dir, "inswapper_128_fp16.onnx").exists())
-        val m = OnnxInitializerReader.readFloatInitializer(File(dir, "inswapper_128_fp16.onnx"))
+        assumeTrue(has(ModelIds.INSWAPPER))
+        val m = OnnxInitializerReader.readFloatInitializer(File(dir, "${ModelIds.INSWAPPER}.onnx"))
         assertEquals(512 * 512, m.size)
         assertEquals(0.12484695f, m[0], 1e-6f)
         assertEquals(-0.08580378f, m[512 * 512 - 1], 1e-6f)
     }
 
     @Test
-    fun fullPipeline() {
-        assumeTrue(File(dir, "scrfd_2.5g.onnx").exists() && File(dir, "ex/source.jpg").exists() && File(dir, "ex/target.jpg").exists())
-        val src = load(File(dir, "ex/source.jpg"))
-        val tgt = load(File(dir, "ex/target.jpg"))
+    fun detectorsAgree() {
+        assumeTrue(ready() && has(ModelIds.YUNET) && has(ModelIds.SCRFD))
         engine().use { e ->
-            val sf = e.detect(src)
-            val tf = e.detect(tgt)
-            println("source faces=${sf.size} ${sf.map { it.score }}  target faces=${tf.size}")
-            assertTrue(sf.isNotEmpty() && tf.isNotEmpty())
-            // detection visualisation
-            val vis = tgt.copy()
-            for (f in tf) for (k in 0 until 5) {
-                val x = f.landmarks[2 * k].toInt(); val y = f.landmarks[2 * k + 1].toInt()
-                for (dy in -1..1) for (dx in -1..1) if (x + dx in 0 until vis.width && y + dy in 0 until vis.height) vis.pixels[(y + dy) * vis.width + x + dx] = 0xFF00FF00.toInt()
+            val y = e.detect(tgt, SwapConfig(detectorId = ModelIds.YUNET, landmarks68 = false))
+            val s = e.detect(tgt, SwapConfig(detectorId = ModelIds.SCRFD, landmarks68 = false))
+            println("yunet=${y.size} scrfd=${s.size}")
+            assertTrue(y.size == 1 && s.size == 1)
+            var maxDiff = 0f
+            for (i in 0 until 10) maxDiff = maxOf(maxDiff, kotlin.math.abs(y[0].landmarks[i] - s[0].landmarks[i]))
+            println("max 5-pt landmark diff yunet vs scrfd = $maxDiff px")
+            assertTrue(maxDiff < 8f)
+            if (has(ModelIds.HRFFA)) {
+                val r = e.detect(tgt, SwapConfig())
+                assertTrue(r[0].landmarks68 != null)
+                val d = (0 until 10).maxOf { kotlin.math.abs(r[0].landmarks[it] - s[0].landmarks[it]) }
+                println("hrffa-derived 5-pt vs scrfd max diff = $d px")
+                assertTrue(d < 10f)
+                save(tgt.copy().also { Debugger.draw(it, r, emptySet()) }, "debug_overlay.png")
             }
-            save(vis, "detect.png")
+        }
+    }
 
-            val source = e.buildSource("s", "Source", listOf(src to sf.maxBy { it.area }))
-            val selfSim = Geometry.cosine(source.averaged, e.embed(src, sf.maxBy { it.area }))
-            val crossSim = Geometry.cosine(source.averaged, e.embed(tgt, tf.maxBy { it.area }))
-            println("self sim=$selfSim  source-vs-target sim=$crossSim")
-
-            for (boost in listOf(128, 256, 512)) {
-                val r = e.process(tgt, listOf(FaceMapping(source)), SwapConfig(pixelBoost = boost))
-                println("boost=$boost swapped=${r.facesSwapped} in ${r.millis}ms decision=${r.decision}")
-                assertTrue(r.facesSwapped > 0)
-                save(r.image, "swap_$boost.png")
-                // the swapped face should now look like the source identity
-                val after = Geometry.cosine(source.averaged, e.recognizer.embed(r.image, e.detect(r.image).maxBy { it.area }))
-                println("  identity similarity after swap=$after (before=$crossSim)")
-                assertTrue(after > crossSim + 0.2f)
+    @Test
+    fun swappersAndMasks() {
+        assumeTrue(ready() && has(ModelIds.HYPERSWAP_1A))
+        engine().use { e ->
+            val source = e.buildSource("s", "S", listOf(src to e.detect(src).maxBy { it.area }))
+            val before = identityAfter(e, tgt, source)
+            val cases = listOf(
+                "hyperswap_box_model" to SwapConfig(),
+                "hyperswap_region_area" to SwapConfig(maskTypes = setOf(MaskType.BOX, MaskType.MODEL, MaskType.REGION, MaskType.AREA)),
+                "hyperswap_boost512" to SwapConfig(pixelBoost = 512),
+                "inswapper_boost256" to SwapConfig(swapperId = ModelIds.INSWAPPER, pixelBoost = 256, maskTypes = setOf(MaskType.BOX)),
+                "hyperswap_gpen256" to SwapConfig(enhancerId = ModelIds.GPEN_256),
+                "hyperswap_gfpgan" to SwapConfig(enhancerId = ModelIds.GFPGAN),
+                "hyperswap_restoreformer" to SwapConfig(enhancerId = ModelIds.RESTOREFORMER),
+                "hyperswap_codeformer" to SwapConfig(enhancerId = ModelIds.CODEFORMER),
+                "hyperswap_expression" to SwapConfig(expressionRestore = 0.8f),
+            )
+            for ((name, cfg) in cases) {
+                if (!e.has(cfg.swapperId) || (cfg.enhancerId != null && !e.has(cfg.enhancerId))) { println("skip $name"); continue }
+                val r = e.process(tgt, listOf(FaceMapping(source)), cfg)
+                val after = identityAfter(e, r.image, source)
+                println("%-26s swapped=%d %5d ms identity %.3f→%.3f  %s".format(name, r.facesSwapped, r.millis, before, after, r.timings))
+                save(r.image, "$name.png")
+                assertTrue(r.facesSwapped == 1)
+                assertTrue(after > before + 0.3f, "$name identity too low: $after")
+                if (cfg.enhancerId != null || cfg.expressionRestore > 0f) e.unloadAll()
             }
-            val r = e.process(tgt, listOf(FaceMapping(source)), SwapConfig(pixelBoost = 256, enhance = true))
-            println("enhanced in ${r.millis}ms")
-            save(r.image, "swap_256_enhanced.png")
-            println("explicit prob target=${e.policy.isExplicit(tgt)}")
+        }
+    }
+
+    @Test
+    fun processors() {
+        assumeTrue(ready())
+        engine().use { e ->
+            val face = e.detect(tgt).maxBy { it.area }
+            fun p() = e.processors
+            if (e.has(ModelIds.MODNET)) {
+                val t = System.currentTimeMillis()
+                val bg = p().replaceBackground(tgt, Processors.Background.Color(0x00FFFFFF))
+                println("background (modnet) ${System.currentTimeMillis() - t} ms")
+                val fg = p().foregroundMask(tgt)
+                val c = fg[(face.centerY.toInt()) * tgt.width + face.centerX.toInt()]
+                val corner = fg[5 * tgt.width + tgt.width - 5]
+                println("  alpha on face=$c, top-right corner=$corner")
+                assertTrue(c > 0.8f && corner < 0.2f)
+                save(bg, "background_white.png")
+                save(p().replaceBackground(tgt, Processors.Background.Transparent), "background_transparent.png")
+                e.unloadAll()
+            }
+            if (e.has(ModelIds.SPAN_X4)) {
+                val small = ImageOps.resize(tgt, 160, 85)
+                val t = System.currentTimeMillis()
+                val up = p().enhanceFrame(small, ModelIds.SPAN_X4)
+                println("frame enhancer span x4 160x85 -> ${up.width}x${up.height} in ${System.currentTimeMillis() - t} ms")
+                assertEquals(640, up.width)
+                save(up, "frame_span_x4.png")
+            }
+            if (e.has(ModelIds.ESRGAN_X2)) {
+                val small = ImageOps.resize(tgt, 160, 85)
+                val up = p().enhanceFrame(small, ModelIds.ESRGAN_X2)
+                assertEquals(320, up.width)
+                save(up, "frame_esrgan_x2.png")
+                e.unloadAll()
+            }
+            if (p().hasAge) {
+                val t = System.currentTimeMillis()
+                val older = p().modifyAge(tgt, face, 25f, 70f)
+                println("age 25->70 ${System.currentTimeMillis() - t} ms")
+                save(older, "age_70.png")
+                val diff = older.pixels.indices.count { older.pixels[it] != tgt.pixels[it] }
+                assertTrue(diff > 1000)
+                e.unloadAll()
+            }
+            if (p().hasFaceEditor) {
+                val t = System.currentTimeMillis()
+                val ed = p().editFace(tgt, face, Processors.FaceEdit(mouthSmile = 0.8f, headYaw = 0.2f, eyeOpen = 0.5f))
+                println("face editor ${System.currentTimeMillis() - t} ms")
+                save(ed, "edit_smile.png")
+                val r = e.recognizer.embed(ed, e.detect(ed).maxBy { it.area })
+                val o = e.recognizer.embed(tgt, face)
+                println("  identity kept after edit: ${Geometry.cosine(r, o)}")
+                assertTrue(Geometry.cosine(r, o) > 0.5f)
+                e.unloadAll()
+            }
+            e.mobileFaceSwap()?.let { mfs ->
+                val id = mfs.buildIdentity(src, e.detect(src).maxBy { it.area })
+                val frame = tgt.copy()
+                val t = System.nanoTime()
+                e.previewSwap(frame, listOf(face), id)
+                println("mobilefaceswap preview ${(System.nanoTime() - t) / 1_000_000} ms")
+                save(frame, "preview_mobilefaceswap.png")
+                val s = e.buildSource("s", "S", listOf(src to e.detect(src).maxBy { it.area }))
+                val after = identityAfter(e, frame, s)
+                println("  preview identity $after")
+                assertTrue(after > 0.35f)
+            }
         }
     }
 
     @Test
     fun policyRules() {
-        assumeTrue(File(dir, "scrfd_2.5g.onnx").exists() && File(dir, "ex/source.jpg").exists() && File(dir, "ex/target.jpg").exists())
-        val src = load(File(dir, "ex/source.jpg"))
-        val tgt = load(File(dir, "ex/target.jpg"))
+        assumeTrue(ready() && has(ModelIds.OPEN_NSFW))
         engine().use { e ->
             val s = e.buildSource("s", "S", listOf(src to e.detect(src).maxBy { it.area }))
             val other = e.buildSource("o", "O", listOf(tgt to e.detect(tgt).maxBy { it.area }))
-            // non-explicit: always allowed
             assertTrue(e.policy.evaluate(false, listOf(other)).allowed)
-            // explicit + nobody verified: blocked
             assertTrue(e.policy.evaluate(true, listOf(s)) is PolicyDecision.ExplicitRequiresVerification)
-            // explicit + verified as S: own face allowed, someone else blocked, mixed blocked
             e.policy.verifier = FakeIdentityVerifier(s.averaged)
             assertTrue(e.policy.evaluate(true, listOf(s)).allowed)
             assertTrue(e.policy.evaluate(true, listOf(other)) is PolicyDecision.ExplicitIdentityMismatch)
             assertTrue(!e.policy.evaluate(true, listOf(s, other)).allowed)
-            // internal build live-capture mode: gallery source blocked, live source allowed
             e.policy.verifier = NoIdentityVerifier
             e.policy.internalLiveCaptureMode = true
             val live = SourceFace("l", "L", s.embeddings, SourceProvenance.LIVE_CAMERA)
@@ -118,10 +197,9 @@ class PipelineTest {
             assertTrue(!e.policy.evaluate(true, listOf(live, other)).allowed)
             e.policy.internalLiveCaptureMode = false
             assertTrue(!e.policy.evaluate(true, listOf(live)).allowed)
-            // explicit override on a real frame is blocked without verification
-            e.policy.verifier = NoIdentityVerifier
             val r = e.process(tgt, listOf(FaceMapping(s)), SwapConfig(), explicitOverride = true)
             assertEquals(0, r.facesSwapped)
+            assertTrue(!e.policy.isExplicit(tgt))
         }
     }
 }

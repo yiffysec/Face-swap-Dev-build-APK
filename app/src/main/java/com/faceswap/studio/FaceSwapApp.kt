@@ -12,6 +12,7 @@ class FaceSwapApp : Application() {
     lateinit var settings: SettingsStore; private set
     lateinit var engine: EngineHolder; private set
     lateinit var tuning: com.faceswap.studio.engine.TuningStore; private set
+    lateinit var perf: com.faceswap.studio.engine.PerformanceManager; private set
 
     override fun onCreate() {
         super.onCreate()
@@ -21,7 +22,8 @@ class FaceSwapApp : Application() {
         library = FaceLibrary(this)
         settings = SettingsStore(this)
         tuning = com.faceswap.studio.engine.TuningStore(this)
-        engine = EngineHolder(models, tuning)
+        engine = EngineHolder(this, models, tuning)
+        perf = com.faceswap.studio.engine.PerformanceManager(this)
         // Production: engine.verifier = YourKycVerifier(...)  (see README "Identity verification")
     }
 }

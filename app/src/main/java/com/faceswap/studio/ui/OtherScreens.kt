@@ -66,8 +66,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.faceswap.core.FaceRegion
 import com.faceswap.core.FaceSelector
-import com.faceswap.core.MaskShape
+import com.faceswap.core.MaskType
+import com.faceswap.core.ModelIds
+import com.faceswap.studio.data.ModelGroup
 import com.faceswap.studio.data.Accelerator
 import com.faceswap.studio.data.LibraryFace
 import com.faceswap.studio.data.ModelCatalog
@@ -200,54 +203,64 @@ fun ModelsScreen(vm: AppViewModel, gate: Boolean) {
     Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(if (gate) "Set up FaceSwap Studio" else "Models", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text(
-            "Everything runs on your phone. Models download once from Hugging Face and are verified by checksum; no images ever leave the device.",
+            "Everything runs on your phone. Core models ship inside the APK; extras come as offline model packs (Import) or download once from Hugging Face. Nothing ever leaves the device.",
             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        OutlinedButton(onClick = { importer.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+            Text("Import model files / model pack .zip (offline)")
+        }
         val missing = ModelCatalog.all.filter { it.required && states[it.id] !is ModelState.Ready }
         if (states.values.any { it is ModelState.Installing }) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 12.dp)) {
                 androidx.compose.material3.CircularProgressIndicator(Modifier.size(22.dp)); Spacer(Modifier.size(10.dp))
-                Text("Installing bundled models… (one time, about a minute)")
+                Text("Installing models… (one time)")
             }
         } else if (missing.isNotEmpty()) {
             Button(onClick = vm::downloadRequired, modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp).height(52.dp)) {
                 Text("Download required models (${mb(missing.sumOf { it.sizeBytes })})")
             }
         }
-        ModelCatalog.all.forEach { spec ->
-            val s = states[spec.id] ?: ModelState.Missing
-            Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(spec.title + if (spec.required) "" else "  (optional)", fontWeight = FontWeight.SemiBold)
-                            Text("${spec.description} · ${mb(spec.sizeBytes)}", style = MaterialTheme.typography.bodySmall)
-                            Text("License: ${spec.license}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        when (s) {
-                            is ModelState.Ready -> TextButton(onClick = { vm.deleteModel(spec) }) { Text("Delete") }
-                            is ModelState.Downloading -> TextButton(onClick = { vm.cancelDownload(spec) }) { Text("Pause") }
-                            is ModelState.Verifying -> Text("Verifying…", style = MaterialTheme.typography.bodySmall)
-                            is ModelState.Installing -> Text("Installing…", style = MaterialTheme.typography.bodySmall)
-                            else -> TextButton(onClick = { vm.download(spec) }) { Text(if (s is ModelState.Failed) "Retry" else "Get") }
-                        }
-                    }
-                    when (s) {
-                        is ModelState.Downloading -> {
-                            LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                            Text("${mb(s.bytes)} / ${mb(s.total)}", style = MaterialTheme.typography.labelSmall)
-                        }
-                        is ModelState.Failed -> Text(s.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                        is ModelState.Ready -> Text("Ready", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.labelSmall)
-                        else -> Unit
-                    }
+        ModelGroup.entries.forEach { group ->
+            val specs = ModelCatalog.all.filter { it.group == group }
+            val absent = specs.filter { states[it.id] !is ModelState.Ready }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionTitle(group.title, Modifier.weight(1f))
+                if (absent.isNotEmpty() && group != ModelGroup.REQUIRED) TextButton(onClick = { absent.forEach(vm::download) }) { Text("Get all (${mb(absent.sumOf { it.sizeBytes })})") }
+            }
+            specs.forEach { spec -> ModelRow(vm, spec, states[spec.id] ?: ModelState.Missing) }
+        }
+        Text("Downloads resume if interrupted.", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun ModelRow(vm: AppViewModel, spec: com.faceswap.studio.data.ModelSpec, s: ModelState) {
+    val gpu = remember(s) { vm.models.tflite(spec.id) != null }
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(spec.title + if (gpu) "  · GPU twin" else "", fontWeight = FontWeight.SemiBold)
+                    Text("${spec.description} · ${mb(spec.sizeBytes)}", style = MaterialTheme.typography.bodySmall)
+                    Text("License: ${spec.license}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                when (s) {
+                    is ModelState.Ready -> TextButton(onClick = { vm.deleteModel(spec) }) { Text("Delete") }
+                    is ModelState.Downloading -> TextButton(onClick = { vm.cancelDownload(spec) }) { Text("Pause") }
+                    is ModelState.Verifying -> Text("Verifying…", style = MaterialTheme.typography.bodySmall)
+                    is ModelState.Installing -> Text("Installing…", style = MaterialTheme.typography.bodySmall)
+                    else -> TextButton(onClick = { vm.download(spec) }) { Text(if (s is ModelState.Failed) "Retry" else "Get") }
                 }
             }
+            when (s) {
+                is ModelState.Downloading -> {
+                    LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                    Text("${mb(s.bytes)} / ${mb(s.total)}", style = MaterialTheme.typography.labelSmall)
+                }
+                is ModelState.Failed -> Text(s.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                else -> Unit
+            }
         }
-        OutlinedButton(onClick = { importer.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
-            Text("Import model files from storage (offline)")
-        }
-        Text("Downloads resume if interrupted. For offline devices, copy the .onnx files over USB and import them, or use a build with bundled models.", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -270,21 +283,44 @@ private fun SliderRow(label: String, value: Float, range: ClosedFloatingPointRan
 }
 
 @Composable
+private fun <T> ChipRow(options: List<Pair<T, String>>, selected: (T) -> Boolean, onPick: (T) -> Unit) {
+    androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        items(options.size) { i -> val (v, l) = options[i]; FilterChip(selected(v), { onPick(v) }, { Text(l) }) }
+    }
+}
+
+@Composable
 fun SettingsScreen(vm: AppViewModel) {
     val s by vm.settings.collectAsState()
     val unlocked by vm.internalUnlocked.collectAsState()
+    val m = vm.models
     fun up(t: (com.faceswap.studio.data.AppSettings) -> com.faceswap.studio.data.AppSettings) = vm.updateSettings(t)
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text("Settings", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
 
         SectionTitle("Quality preset")
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { QualityPreset.entries.forEach { p -> FilterChip(s.preset == p, { up { it.copy(preset = p) } }, { Text(p.label) }) } }
-        Text("Fast = native 128px · Balanced = 2× pixel boost · High = boost + GFPGAN · Ultra = 4× boost + GFPGAN", style = MaterialTheme.typography.bodySmall)
+        ChipRow(QualityPreset.entries.map { it to it.label }, { s.preset == it }) { p -> up { it.copy(preset = p) } }
+        Text("Fast = native · Balanced = native + enhancer · High = 2× pixel boost + enhancer · Ultra = 4× boost + enhancer", style = MaterialTheme.typography.bodySmall)
 
-        SectionTitle("Blending")
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(MaskShape.BOX to "Box", MaskShape.ELLIPSE to "Oval", MaskShape.BOX_AND_ELLIPSE to "Box ∩ Oval").forEach { (m, l) -> FilterChip(s.maskShape == m, { up { it.copy(maskShape = m) } }, { Text(l) }) }
+        SectionTitle("Face swapper")
+        ChipRow(ModelIds.SWAPPERS.filter { m.has(it) }.map { it to it.replace("_256", "").replace("_128_fp16", "").replace("_", " ") }, { s.swapperId == it }) { id -> up { it.copy(swapperId = id) } }
+
+        SectionTitle("Face enhancer")
+        ChipRow(listOf("auto" to "Auto (GPEN-256)", "none" to "Off") + ModelIds.ENHANCERS.filter { m.has(it) }.map { it to it.replace("_", " ") }, { s.enhancer == it }) { id -> up { it.copy(enhancer = id) } }
+        SliderRow("Enhancer blend", s.enhanceBlend, 0f..1f) { v -> up { it.copy(enhanceBlend = v) } }
+        if (s.enhancer == ModelIds.CODEFORMER) SliderRow("CodeFormer fidelity", s.codeformerFidelity, 0f..1f) { v -> up { it.copy(codeformerFidelity = v) } }
+
+        SectionTitle("Expression restorer (LivePortrait)")
+        if (m.has(ModelIds.LP_GENERATOR)) SliderRow("Restore target expression", s.expressionRestore, 0f..1f) { v -> up { it.copy(expressionRestore = v) } }
+        else Text("Install the LivePortrait models to restore the target's original expression after swapping.", style = MaterialTheme.typography.bodySmall)
+
+        SectionTitle("Masks")
+        val maskOptions = listOf(MaskType.BOX to "Box", MaskType.MODEL to "Swapper mask", MaskType.REGION to "Face parser", MaskType.AREA to "Landmark area", MaskType.ELLIPSE to "Oval")
+        ChipRow(maskOptions, { it in s.maskTypes }) { t -> up { it.copy(maskTypes = if (t in it.maskTypes) it.maskTypes - t else it.maskTypes + t) } }
+        if (MaskType.REGION in s.maskTypes) {
+            Text("Parser regions (unselected parts keep the original – e.g. untick glasses to keep the target's glasses)", style = MaterialTheme.typography.bodySmall)
+            ChipRow(FaceRegion.entries.map { it to it.name.lowercase().replace("_", " ") }, { it in s.maskRegions }) { r -> up { it.copy(maskRegions = if (r in it.maskRegions) it.maskRegions - r else it.maskRegions + r) } }
         }
         SliderRow("Edge feather", s.maskBlur, 0.05f..0.8f) { v -> up { it.copy(maskBlur = v) } }
         SliderRow("Trim top (forehead)", s.maskPaddingTop, 0f..0.3f) { v -> up { it.copy(maskPaddingTop = v) } }
@@ -292,16 +328,13 @@ fun SettingsScreen(vm: AppViewModel) {
         SliderRow("Swap strength", s.swapOpacity, 0.3f..1f) { v -> up { it.copy(swapOpacity = v) } }
         SliderRow("Colour match to target", s.colorMatch, 0f..1f) { v -> up { it.copy(colorMatch = v) } }
         SliderRow("Sharpen", s.sharpen, 0f..1.5f) { v -> up { it.copy(sharpen = v) } }
-        SliderRow("Enhancer blend", s.enhanceBlend, 0f..1f) { v -> up { it.copy(enhanceBlend = v) } }
 
         SectionTitle("Detection")
+        ChipRow(listOf(ModelIds.YUNET to "YuNet (fast)", ModelIds.SCRFD to "SCRFD").filter { m.has(it.first) }, { s.detectorId == it }) { id -> up { it.copy(detectorId = id) } }
+        ToggleRow("68-point landmarks (HRFFA) for alignment", s.landmarks68) { v -> up { it.copy(landmarks68 = v) } }
         SliderRow("Per-face match tolerance", s.referenceThreshold, 0.2f..0.6f) { v -> up { it.copy(referenceThreshold = v) } }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(320 to "Fast", 480 to "Normal", 640 to "Accurate").forEach { (sz, l) -> FilterChip(s.detectorSize == sz, { up { it.copy(detectorSize = sz) } }, { Text("$l ($sz)") }) }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(FaceSelector.ALL to "All faces", FaceSelector.LARGEST to "Largest", FaceSelector.CENTER to "Center").forEach { (sel, l) -> FilterChip(s.selector == sel, { up { it.copy(selector = sel) } }, { Text(l) }) }
-        }
+        ChipRow(listOf(FaceSelector.ALL to "All faces", FaceSelector.LARGEST to "Largest", FaceSelector.CENTER to "Center"), { s.selector == it }) { sel -> up { it.copy(selector = sel) } }
+        ToggleRow("Debug overlay (boxes, landmarks)", s.debugOverlay) { v -> up { it.copy(debugOverlay = v) } }
 
         SectionTitle("Performance")
         val ctx = LocalContext.current
@@ -313,12 +346,14 @@ fun SettingsScreen(vm: AppViewModel) {
         }
         launchTuner = { tuner.launch(Intent(ctx, com.faceswap.studio.engine.TunerActivity::class.java)) }
         Button(onClick = { if (vm.beginTuning(fresh = true)) launchTuner() }, modifier = Modifier.fillMaxWidth()) { Text(if (tuneSummary == null) "Tune for this device" else "Re-run device tuning") }
-        Text(tuneSummary ?: "Not tuned yet – Auto uses CPU for every model until you run tuning (takes 2–5 minutes).",
+        Text(tuneSummary ?: "Not tuned yet – Auto uses CPU for every model until you run tuning (5–10 minutes; NPU/GPU compilation is the slow part).",
             Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.bodySmall)
-        Text("Big cores detected: ${com.faceswap.studio.engine.CpuInfo.bigCores} · SoC: ${com.faceswap.studio.engine.socModel()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { Accelerator.entries.forEach { a -> FilterChip(s.accelerator == a, { up { it.copy(accelerator = a) } }, { Text(a.label) }) } }
+        Text("Big cores: ${com.faceswap.studio.engine.CpuInfo.bigCores} · SoC: ${com.faceswap.studio.engine.socModel()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        ChipRow(Accelerator.entries.map { it to it.label }, { s.accelerator == it }) { a -> up { it.copy(accelerator = a) } }
         SliderRow("CPU threads", s.threads.toFloat(), 1f..8f, { it.toInt().toString() }) { v -> up { it.copy(threads = v.toInt()) } }
-        Text("Auto uses the fastest backend the tuner verified for each model. Forcing XNNPACK/NNAPI skips that safety check – switch back to Auto or CPU if the app closes.", style = MaterialTheme.typography.bodySmall)
+        SliderRow("Video render workers", s.videoWorkers.toFloat(), 1f..4f, { it.toInt().toString() }) { v -> up { it.copy(videoWorkers = v.toInt()) } }
+        if (vm.rootAvailable) ToggleRow("Root performance boost during video (CPU governors + memory clocks; thermal limits untouched)", s.rootBoost) { v -> up { it.copy(rootBoost = v) } }
+        Text("Auto uses the fastest backend the tuner verified for each model. Forcing a backend skips that check – switch back to Auto if the app closes.", style = MaterialTheme.typography.bodySmall)
 
         SectionTitle("Diagnostics")
         Text("Crash reports are kept on the device only. If the app closes unexpectedly, the report opens automatically on next launch.", style = MaterialTheme.typography.bodySmall)
@@ -339,6 +374,6 @@ fun SettingsScreen(vm: AppViewModel) {
             }
         }
         Spacer(Modifier.height(24.dp))
-        Text("FaceSwap Studio · on-device · ONNX Runtime", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+        Text("FaceSwap Studio · on-device · ONNX Runtime + LiteRT", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
     }
 }

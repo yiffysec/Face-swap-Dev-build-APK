@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -49,7 +50,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
 enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    PHOTO("Photo", Icons.Default.Image), VIDEO("Video", Icons.Default.Movie), LIBRARY("Faces", Icons.Default.Face),
+    PHOTO("Photo", Icons.Default.Image), VIDEO("Video", Icons.Default.Movie), LIVE("Live", Icons.Default.Videocam), LIBRARY("Faces", Icons.Default.Face),
     MODELS("Models", Icons.Default.CloudDownload), SETTINGS("Settings", Icons.Default.Settings),
 }
 
@@ -68,6 +69,10 @@ fun FaceSwapRoot(vm: AppViewModel) {
 
     val pickFace = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let { vm.importFromGallery(it) } }
     val camera = rememberLauncherForActivityResult(TakeSelfie()) { ok -> vm.onCaptured(ok) }
+    // The app declares CAMERA (for live preview), so Android requires the grant before ACTION_IMAGE_CAPTURE too.
+    val cameraPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) camera.launch(vm.newCaptureUri()) else Toast.makeText(ctx, "Camera permission is needed for live capture", Toast.LENGTH_SHORT).show()
+    }
     val adders = remember {
         FaceAdders(
             gallery = {
@@ -76,7 +81,8 @@ fun FaceSwapRoot(vm: AppViewModel) {
             },
             camera = {
                 if (!vm.models.requiredReady) Toast.makeText(ctx, "Download the required models first", Toast.LENGTH_SHORT).show()
-                else camera.launch(vm.newCaptureUri())
+                else if (androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) camera.launch(vm.newCaptureUri())
+                else cameraPerm.launch(android.Manifest.permission.CAMERA)
             },
         )
     }
@@ -85,14 +91,15 @@ fun FaceSwapRoot(vm: AppViewModel) {
         bottomBar = {
             NavigationBar {
                 Tab.entries.forEach { t ->
-                    NavigationBarItem(selected = tab == t, onClick = { tab = t }, icon = { Icon(t.icon, t.label) }, label = { Text(t.label) })
+                    NavigationBarItem(selected = tab == t, onClick = { tab = t }, icon = { Icon(t.icon, t.label) }, label = { Text(t.label, maxLines = 1) })
                 }
             }
         },
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(pad)) {
             when {
-                !requiredReady && tab in setOf(Tab.PHOTO, Tab.VIDEO, Tab.LIBRARY) -> ModelsScreen(vm, gate = true)
+                !requiredReady && tab in setOf(Tab.PHOTO, Tab.VIDEO, Tab.LIVE, Tab.LIBRARY) -> ModelsScreen(vm, gate = true)
+                tab == Tab.LIVE -> LiveScreen(vm)
                 tab == Tab.PHOTO -> PhotoScreen(vm, adders)
                 tab == Tab.VIDEO -> VideoScreen(vm, adders)
                 tab == Tab.LIBRARY -> LibraryScreen(vm, adders)
