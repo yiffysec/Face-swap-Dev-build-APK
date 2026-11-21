@@ -24,6 +24,8 @@ DEFAULT_IDS = [
     "hyperswap_1c_256", "bisenet_resnet_18", "gpen_bfr_256", "gpen_bfr_512", "gfpgan_1.4", "modnet",
     "span_kendata_x4", "real_esrgan_x2_fp16", "real_esrgan_x4_fp16", "open_nsfw",
 ]
+MAPPING_VERSION = 2  # 2 = tensors addressed by signature name (LiteRT CompiledModel runs by signature)
+
 # dynamic dims are fixed for conversion (GPU delegates want static shapes)
 FIXED = {
     "span_kendata_x4": {"input": [1, 3, 128, 128]},
@@ -92,7 +94,11 @@ def convert(models_dir: str, mid: str) -> str:
         return "missing"
     out_tfl = os.path.join(models_dir, f"{mid}.tflite")
     if os.path.exists(out_tfl) and os.path.exists(out_tfl + ".json"):
-        return "cached"
+        try:
+            if json.load(open(out_tfl + ".json")).get("version") == MAPPING_VERSION:
+                return "cached"
+        except Exception:
+            pass
     with tempfile.TemporaryDirectory() as tmp:
         work = os.path.join(tmp, f"{mid}.onnx")
         to_fp32(os.path.realpath(src), work)
@@ -107,44 +113,48 @@ def convert(models_dir: str, mid: str) -> str:
         fp16 = os.path.join(tmp, "out", f"{mid}_float16.tflite")
         if r.returncode != 0 or not os.path.exists(fp16):
             return "convert-failed: " + (r.stderr or r.stdout)[-300:].replace("\n", " ")
-        # verify against ONNX Runtime
+        # verify against ONNX Runtime through the SIGNATURE runner (same addressing the app uses)
         from ai_edge_litert.interpreter import Interpreter
         it = Interpreter(model_path=fp16)
-        it.allocate_tensors()
+        sigs = it.get_signature_list()
+        if not sigs:
+            return "no signature"
+        sig_key = next(iter(sigs))
+        runner = it.get_signature_runner(sig_key)
+        in_details = runner.get_input_details()
         rng = np.random.default_rng(0)
         feeds = feeds_for(sess, rng)
         ref = sess.run(None, feeds)
-        ins, outs = it.get_input_details(), it.get_output_details()
-        mapping = {"inputs": [], "outputs": []}
-        for d in ins:
-            name = next((k for k in feeds if d["name"] == k or d["name"].startswith(k) or k in d["name"]), None)
+        mapping = {"version": MAPPING_VERSION, "signature": sig_key, "inputs": [], "outputs": []}
+        call = {}
+        for sname, d in in_details.items():
+            name = next((k for k in feeds if sname == k or sname.startswith(k) or k in sname or d["name"] == k), None)
+            if name is None and len(feeds) == 1:
+                name = next(iter(feeds))
             if name is None:
-                return f"unmatched input {d['name']}"
+                return f"unmatched input {sname}"
             x = feeds[name]
             nhwc = list(x.shape) != [int(v) for v in d["shape"]]
-            it.set_tensor(d["index"], x.transpose(0, 2, 3, 1) if nhwc else x)
-            mapping["inputs"].append({"onnx": name, "tflite": d["name"], "index": len(mapping["inputs"]), "nhwc": nhwc,
-                                      "shape": [int(v) for v in x.shape]})
-        it.invoke()
+            call[sname] = x.transpose(0, 2, 3, 1) if nhwc else x
+            mapping["inputs"].append({"onnx": name, "tflite": sname, "nhwc": nhwc, "shape": [int(v) for v in x.shape]})
+        outs = runner(**call)
         worst = 0.0
         used = set()
         for o, rv in zip(sess.get_outputs(), ref):
             match = None
-            for j, d in enumerate(outs):
-                if j in used:
+            for sname, y in outs.items():
+                if sname in used:
                     continue
-                y = it.get_tensor(d["index"])
                 for nhwc, cand in ((False, y), (True, y.transpose(0, 3, 1, 2) if y.ndim == 4 else None)):
                     if cand is not None and cand.shape == rv.shape:
                         err = float(np.abs(cand - rv).max() / (np.abs(rv).max() + 1e-6))
                         if match is None or err < match[0]:
-                            match = (err, j, nhwc, d["name"])
+                            match = (err, sname, nhwc)
             if match is None:
                 return f"unmatched output {o.name}"
             used.add(match[1])
             worst = max(worst, match[0])
-            mapping["outputs"].append({"onnx": o.name, "tflite": match[3], "index": match[1], "nhwc": match[2],
-                                       "shape": list(rv.shape)})
+            mapping["outputs"].append({"onnx": o.name, "tflite": match[1], "nhwc": match[2], "shape": list(rv.shape)})
         if worst > 0.02:
             return f"verify-failed rel err {worst:.4f}"
         mapping["maxRelError"] = worst

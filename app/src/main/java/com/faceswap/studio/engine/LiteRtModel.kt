@@ -16,7 +16,8 @@ import java.io.File
  * TFLite signature, so the engine code is identical across runtimes.
  */
 class LiteRtModel(context: Context, tflite: File, accelerator: Accelerator = Accelerator.GPU) : InferenceModel {
-    private data class Io(val onnx: String, val index: Int, val nhwc: Boolean, val shape: LongArray)
+    /** [sig] = tensor name in the TFLite signature (LiteRT runs by signature, not by interpreter order). */
+    private data class Io(val onnx: String, val sig: String, val nhwc: Boolean, val shape: LongArray)
 
     override val name = tflite.nameWithoutExtension
     override val backend = "LiteRT/${accelerator.name}"
@@ -24,8 +25,9 @@ class LiteRtModel(context: Context, tflite: File, accelerator: Accelerator = Acc
     private val inputs: List<Io>
     private val outputs: List<Io>
     private val model: CompiledModel
-    private val inBuffers: List<TensorBuffer>
-    private val outBuffers: List<TensorBuffer>
+    private val signature: String
+    private val inBuffers: Map<String, TensorBuffer>
+    private val outBuffers: Map<String, TensorBuffer>
 
     init {
         val meta = JSONObject(File(tflite.path + ".json").readText())
@@ -33,9 +35,11 @@ class LiteRtModel(context: Context, tflite: File, accelerator: Accelerator = Acc
             (0 until a.length()).map { i ->
                 val o = a.getJSONObject(i)
                 val s = o.getJSONArray("shape")
-                Io(o.getString("onnx"), o.getInt("index"), o.getBoolean("nhwc"), LongArray(s.length()) { s.getLong(it) })
+                Io(o.getString("onnx"), o.getString("tflite"), o.getBoolean("nhwc"), LongArray(s.length()) { s.getLong(it) })
             }
         }
+        require(meta.optInt("version") >= 2) { "outdated TFLite mapping – re-run tools/convert_tflite.py" }
+        signature = meta.getString("signature")
         inputs = parse("inputs")
         outputs = parse("outputs")
         val options = CompiledModel.Options(accelerator).apply {
@@ -45,8 +49,8 @@ class LiteRtModel(context: Context, tflite: File, accelerator: Accelerator = Acc
             )
         }
         model = CompiledModel.create(tflite.absolutePath, options, env(context))
-        inBuffers = model.createInputBuffers(0)
-        outBuffers = model.createOutputBuffers(0)
+        inBuffers = inputs.associate { it.sig to model.createInputBuffer(it.sig, signature) }
+        outBuffers = outputs.associate { it.sig to model.createOutputBuffer(it.sig, signature) }
     }
 
     override val inputNames: List<String> = inputs.map { it.onnx }
@@ -57,20 +61,20 @@ class LiteRtModel(context: Context, tflite: File, accelerator: Accelerator = Acc
     override fun run(inputs: Map<String, Tensor>): Map<String, Tensor> {
         for (io in this.inputs) {
             val t = inputs[io.onnx] ?: error("missing input ${io.onnx}")
-            inBuffers[io.index].writeFloat(if (io.nhwc) nchwToNhwc(t.data, io.shape) else t.data)
+            inBuffers.getValue(io.sig).writeFloat(if (io.nhwc) nchwToNhwc(t.data, io.shape) else t.data)
         }
-        model.run(inBuffers, outBuffers, 0)
+        model.run(inBuffers, outBuffers, signature)
         val out = LinkedHashMap<String, Tensor>()
         for (io in outputs) {
-            val d = outBuffers[io.index].readFloat()
+            val d = outBuffers.getValue(io.sig).readFloat()
             out[io.onnx] = Tensor(if (io.nhwc) nhwcToNchw(d, io.shape) else d, io.shape)
         }
         return out
     }
 
     override fun close() {
-        inBuffers.forEach { runCatching { it.close() } }
-        outBuffers.forEach { runCatching { it.close() } }
+        inBuffers.values.forEach { runCatching { it.close() } }
+        outBuffers.values.forEach { runCatching { it.close() } }
         model.close()
     }
 
@@ -79,7 +83,8 @@ class LiteRtModel(context: Context, tflite: File, accelerator: Accelerator = Acc
         @Synchronized fun env(context: Context): Environment = environment ?: Environment.create(context.applicationContext).also { environment = it }
 
         /** True when the TFLite twin + mapping exist for this model. */
-        fun available(dir: File, id: String) = File(dir, "$id.tflite").exists() && File(dir, "$id.tflite.json").exists()
+        fun available(dir: File, id: String) = File(dir, "$id.tflite").exists() &&
+            runCatching { JSONObject(File(dir, "$id.tflite.json").readText()).optInt("version") >= 2 }.getOrDefault(false)
 
         private fun nchwToNhwc(d: FloatArray, s: LongArray): FloatArray {
             val c = s[1].toInt(); val h = s[2].toInt(); val w = s[3].toInt()
