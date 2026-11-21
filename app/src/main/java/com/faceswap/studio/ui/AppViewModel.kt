@@ -20,6 +20,7 @@ import com.faceswap.studio.data.ModelCatalog
 import com.faceswap.studio.data.ModelSpec
 import com.faceswap.studio.internal.InternalTesting
 import com.faceswap.studio.util.Bitmaps
+import com.faceswap.studio.util.Diagnostics
 import com.faceswap.studio.video.VideoProgress
 import com.faceswap.studio.video.VideoSwapper
 import kotlinx.coroutines.Dispatchers
@@ -85,6 +86,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _internalUnlocked = MutableStateFlow(false); val internalUnlocked = _internalUnlocked.asStateFlow()
     private val _keepScreenOn = MutableStateFlow(false); val keepScreenOn = _keepScreenOn.asStateFlow()
     private val _engineLoading = MutableStateFlow(false); val engineLoading = _engineLoading.asStateFlow()
+    private val _importing = MutableStateFlow(false); val importing = _importing.asStateFlow()
+    private val _crashReport = MutableStateFlow(Diagnostics.pendingReport()); val crashReport = _crashReport.asStateFlow()
+
+    fun dismissCrashReport() { Diagnostics.markSeen(); _crashReport.value = null }
+    fun showLastReport() { _crashReport.value = Diagnostics.lastReport() ?: "No crash reports recorded.\n\nRecent steps:\n" + Diagnostics.currentCrumbs() }
+    fun reportShareUri(): Uri? {
+        val f = Diagnostics.reportFile().takeIf { it.exists() } ?: return null
+        val out = File(getApplication<Application>().cacheDir, "outputs/faceswap_crash_report.txt").apply { parentFile?.mkdirs() }
+        f.copyTo(out, overwrite = true)
+        return FileProvider.getUriForFile(getApplication(), getApplication<Application>().packageName + ".files", out)
+    }
 
     private val downloadJobs = HashMap<String, Job>()
     private var videoJob: Job? = null
@@ -120,6 +132,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun engine() = try {
         _engineLoading.value = true
         a.engine.get(settings.value)
+    } catch (oom: OutOfMemoryError) {
+        Diagnostics.crumb("engine: out of memory")
+        a.engine.release()
+        throw IllegalStateException("Not enough memory to load the models – close other apps and try again")
     } finally { _engineLoading.value = false }
 
     // ---------------------------------------------------------------- internal testing
@@ -141,8 +157,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun onCaptured(success: Boolean) {
-        val f = pendingCapture ?: return
+        // pendingCapture is lost if Android killed the app while the camera was open: fall back to the newest capture.
+        val f = pendingCapture ?: File(getApplication<Application>().cacheDir, "captures").listFiles()
+            ?.filter { it.length() > 0 && System.currentTimeMillis() - it.lastModified() < 10 * 60_000 }?.maxByOrNull { it.lastModified() }
+        Diagnostics.crumb("camera returned ok=$success file=${f?.name} size=${f?.length()}")
         pendingCapture = null
+        if (f == null) { toast("Capture was lost – please try again"); return }
         if (!success || !f.exists() || f.length() == 0L) { f.delete(); return }
         startImport(Uri.fromFile(f), live = true, deleteAfter = f)
     }
@@ -150,21 +170,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun importFromGallery(uri: Uri) = startImport(uri, live = false, deleteAfter = null)
 
     private fun startImport(uri: Uri, live: Boolean, deleteAfter: File?) = viewModelScope.launch {
+        _importing.value = true
         try {
-            val e = engine()
-            val (bmp, rgb, faces) = withContext(Dispatchers.Default) {
-                val bmp = Bitmaps.decode(getApplication(), uri, 2048)
-                val rgb = Bitmaps.toRgb(bmp)
-                val faces = e.detect(rgb, settings.value.toConfig()).sortedByDescending { it.area }
-                    .mapIndexed { i, f -> TargetFace(i, f, Bitmaps.faceThumb(rgb, f), e.embed(rgb, f)) }
-                Triple(bmp, rgb, faces)
+            Diagnostics.crumb("import: decoding image (live=$live)")
+            val (bmp, rgb) = withContext(Dispatchers.IO) {
+                val bmp = Bitmaps.decode(getApplication(), uri, 1600)
+                bmp to Bitmaps.toRgb(bmp)
             }
+            Diagnostics.crumb("import: decoded ${bmp.width}x${bmp.height}, loading engine")
+            val e = engine()
+            val faces = withContext(Dispatchers.Default) {
+                Diagnostics.crumb("import: detecting faces")
+                val found = e.detect(rgb, settings.value.toConfig()).sortedByDescending { it.area }
+                Diagnostics.crumb("import: ${found.size} face(s), computing identity")
+                found.mapIndexed { i, f -> TargetFace(i, f, Bitmaps.faceThumb(rgb, f), e.embed(rgb, f)) }
+            }
+            Diagnostics.crumb("import: identity ok")
             if (faces.isEmpty()) { toast("No face found in that photo"); return@launch }
             if (faces.size == 1) saveImported(ImportState(rgb, faces, live, bmp), faces[0], defaultLabel(live))
             else _import.value = ImportState(rgb, faces, live, bmp)
         } catch (t: Throwable) {
-            toast(t.message ?: "Import failed")
+            Diagnostics.crumb("import failed: $t")
+            toast("Import failed: ${t.message ?: t.javaClass.simpleName}")
         } finally {
+            _importing.value = false
             deleteAfter?.delete()
         }
     }
@@ -179,8 +208,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelImport() { _import.value = null }
 
     private suspend fun saveImported(st: ImportState, face: TargetFace, label: String) {
+        Diagnostics.crumb("import: saving to library (live=${st.live})")
         val saved = if (st.live) library.addLive(label, listOf(face.embedding), st.photo, face.thumb)
         else library.addGallery(label, listOf(face.embedding), face.thumb)
+        Diagnostics.crumb("import: saved ${saved.id}")
         toast("Saved “${saved.label}” to library" + if (saved.isLive) " (live)" else "")
     }
 
@@ -266,6 +297,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (mappings.isEmpty()) { toast("Pick a source face first"); return }
         viewModelScope.launch {
             _photo.update { it.copy(busy = true, status = "Swapping…", result = null, savedUri = null) }
+            Diagnostics.crumb("photo: swap ${rgb.width}x${rgb.height}, ${mappings.size} mapping(s), preset=${settings.value.preset}")
             try {
                 val e = engine()
                 val r = withContext(Dispatchers.Default) { e.process(rgb, mappings, settings.value.toConfig()) }
@@ -275,6 +307,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         status = "Swapped ${r.facesSwapped} of ${r.facesFound} face(s) in ${"%.1f".format(r.millis / 1000f)}s")
                 }
             } catch (t: Throwable) {
+                Diagnostics.crumb("photo: failed $t")
                 _photo.update { it.copy(busy = false, status = "Error: ${t.message}") }
             }
         }
@@ -329,6 +362,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         videoJob = viewModelScope.launch {
             _keepScreenOn.value = true
             _video.update { it.copy(running = true, progress = null, output = null, savedUri = null, status = "Loading models…") }
+            Diagnostics.crumb("video: start maxSide=${s.videoMaxSide} enhance=${s.videoEnhance}")
             try {
                 val e = engine()
                 _video.update { it.copy(status = null) }
@@ -344,6 +378,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } catch (c: kotlinx.coroutines.CancellationException) {
                 out.delete(); _video.update { it.copy(running = false, status = "Cancelled") }
             } catch (t: Throwable) {
+                Diagnostics.crumb("video: failed $t")
                 out.delete(); _video.update { it.copy(running = false, status = "Error: ${t.message}") }
             } finally {
                 _keepScreenOn.value = false

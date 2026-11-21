@@ -45,12 +45,15 @@ sealed class PolicyDecision {
  * Everything else is unrestricted.
  */
 class ContentPolicy(
-    private val analyser: ContentAnalyser,
+    analyserFactory: () -> ContentAnalyser,
     var verifier: IdentityVerifier = NoIdentityVerifier,
     private val explicitThreshold: Float = 0.80f,
     /** ArcFace cosine; same person typically 0.45–0.8, different people < 0.3. Strict on purpose. */
     private val identityThreshold: Float = 0.50f,
 ) : java.io.Closeable {
+    private val analyserLazy = lazy(analyserFactory)
+    private val analyser by analyserLazy
+
     /** Set ONLY by internal/debug builds after the developer passphrase is entered. */
     @Volatile var internalLiveCaptureMode: Boolean = false
 
@@ -80,6 +83,6 @@ class ContentPolicy(
 
     fun sameIdentity(a: FloatArray, b: FloatArray) = Geometry.cosine(a, b) >= identityThreshold
 
-    override fun close() = analyser.close()
+    override fun close() { if (analyserLazy.isInitialized()) analyser.close() }
 }
 

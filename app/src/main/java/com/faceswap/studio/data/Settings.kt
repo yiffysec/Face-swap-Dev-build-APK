@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-enum class Accelerator(val label: String) { CPU("CPU"), XNNPACK("XNNPACK (fast CPU)"), NNAPI("NNAPI (GPU/NPU)") }
+enum class Accelerator(val label: String) { CPU("CPU (stable)"), XNNPACK("XNNPACK"), NNAPI("NNAPI (GPU/NPU)") }
 
 enum class QualityPreset(val label: String, val boost: Int, val enhance: Boolean) {
     FAST("Fast", 128, false), BALANCED("Balanced", 256, false), HIGH("High", 256, true), ULTRA("Ultra", 512, true)
@@ -27,7 +27,7 @@ data class AppSettings(
     val enhanceBlend: Float = 0.8f,
     val referenceThreshold: Float = 0.35f,
     val detectorSize: Int = 640,
-    val accelerator: Accelerator = Accelerator.XNNPACK,
+    val accelerator: Accelerator = Accelerator.CPU,
     val threads: Int = 4,
     val videoMaxSide: Int = 1280,
     val videoEnhance: Boolean = false,

@@ -12,6 +12,7 @@ import com.faceswap.studio.data.Accelerator
 import com.faceswap.studio.data.AppSettings
 import com.faceswap.studio.data.ModelManager
 import com.faceswap.studio.data.ModelRole
+import com.faceswap.studio.util.Diagnostics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -37,6 +38,7 @@ class EngineHolder(private val models: ModelManager) {
             engine?.let { if (builtWith == key) return@withContext it }
             engine?.close(); engine = null
             check(models.requiredReady) { "Required models are not downloaded yet" }
+            Diagnostics.crumb("engine: building (${settings.accelerator}, ${settings.threads} threads)")
             val e = FaceSwapEngine(
                 ModelFiles(
                     detector = models.file(ModelRole.DETECTOR),
@@ -62,6 +64,8 @@ class EngineHolder(private val models: ModelManager) {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             setIntraOpNumThreads(threads)
         }
+        val name = java.io.File(path).name
+        Diagnostics.crumb("model load start: $name ($acc)")
         try {
             val opts = base()
             when (acc) {
@@ -72,10 +76,11 @@ class EngineHolder(private val models: ModelManager) {
                 }
                 Accelerator.NNAPI -> opts.addNnapi(EnumSet.of(NNAPIFlags.USE_FP16))
             }
-            env.createSession(path, opts)
+            env.createSession(path, opts).also { Diagnostics.crumb("model load ok: $name") }
         } catch (t: Throwable) {
             Log.w("EngineHolder", "Accelerator $acc failed for $path, falling back to CPU", t)
-            env.createSession(path, base())
+            Diagnostics.crumb("model load failed with $acc (${t.message}), retrying on CPU: $name")
+            env.createSession(path, base()).also { Diagnostics.crumb("model load ok (CPU fallback): $name") }
         }
     }
 }

@@ -306,7 +306,11 @@ fun SettingsScreen(vm: AppViewModel) {
         SectionTitle("Performance")
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { Accelerator.entries.forEach { a -> FilterChip(s.accelerator == a, { up { it.copy(accelerator = a) } }, { Text(a.label) }) } }
         SliderRow("CPU threads", s.threads.toFloat(), 1f..8f, { it.toInt().toString() }) { v -> up { it.copy(threads = v.toInt()) } }
-        Text("XNNPACK is the safest fast option. NNAPI can be faster on phones with a strong NPU and falls back to CPU automatically if unsupported.", style = MaterialTheme.typography.bodySmall)
+        Text("CPU is the most stable. XNNPACK is often faster; NNAPI can be faster on phones with a strong NPU. If a mode fails to load it falls back to CPU, but some driver crashes can't be caught – switch back to CPU if the app closes.", style = MaterialTheme.typography.bodySmall)
+
+        SectionTitle("Diagnostics")
+        Text("Crash reports are kept on the device only. If the app closes unexpectedly, the report opens automatically on next launch.", style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(onClick = vm::showLastReport, modifier = Modifier.padding(top = 6.dp)) { Text("View last crash report") }
 
         if (vm.internalAvailable) {
             HorizontalDivider(Modifier.padding(vertical = 16.dp))

@@ -14,6 +14,7 @@ class FaceSwapApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        com.faceswap.studio.util.Diagnostics.install(this, BuildConfig.VERSION_NAME)
         models = ModelManager(this)
         library = FaceLibrary(this)
         settings = SettingsStore(this)

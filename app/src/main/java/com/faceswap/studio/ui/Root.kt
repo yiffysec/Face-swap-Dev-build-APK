@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -97,6 +100,59 @@ fun FaceSwapRoot(vm: AppViewModel) {
                 tab == Tab.SETTINGS -> SettingsScreen(vm)
             }
         }
+    }
+
+    // Processing indicator after a capture / photo import
+    val importing by vm.importing.collectAsState()
+    if (importing) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Processing face…") },
+            text = {
+                androidx.compose.foundation.layout.Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    androidx.compose.material3.CircularProgressIndicator(Modifier.size(24.dp))
+                    androidx.compose.foundation.layout.Spacer(Modifier.size(12.dp))
+                    Text("Loading models and reading the face. The first time takes a little longer.")
+                }
+            },
+            confirmButton = {},
+        )
+    }
+
+    // Crash report from the previous run (or opened from Settings → Diagnostics)
+    val report by vm.crashReport.collectAsState()
+    report?.let { text ->
+        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+        AlertDialog(
+            onDismissRequest = { vm.dismissCrashReport() },
+            title = { Text("Crash report") },
+            text = {
+                Column {
+                    Text("The app closed unexpectedly last time. Copy or share this report so it can be fixed.", style = MaterialTheme.typography.bodySmall)
+                    androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
+                    Text(
+                        text,
+                        Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(top = 4.dp),
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(text)); Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show() }) { Text("Copy") }
+            },
+            dismissButton = {
+                androidx.compose.foundation.layout.Row {
+                    TextButton(onClick = {
+                        vm.reportShareUri()?.let { uri ->
+                            ctx.startActivity(android.content.Intent.createChooser(android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                type = "text/plain"; putExtra(android.content.Intent.EXTRA_STREAM, uri); addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }, "Share report"))
+                        }
+                    }) { Text("Share") }
+                    TextButton(onClick = { vm.dismissCrashReport() }) { Text("Close") }
+                }
+            },
+        )
     }
 
     // Choose which face to save when an imported photo has several.
