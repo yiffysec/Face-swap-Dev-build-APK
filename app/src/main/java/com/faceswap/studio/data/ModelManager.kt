@@ -124,7 +124,7 @@ class ModelManager(private val context: Context) {
     fun delete(spec: ModelSpec) {
         file(spec).delete(); File(dir, spec.fileName + ".part").delete()
         if (spec.id.startsWith("inswapper")) emapCache.delete()
-        File(dir, "${spec.id}.tflite").delete()
+        File(dir, "${spec.id}.tflite").delete(); File(dir, "${spec.id}.tflite.json").delete()
         set(spec.id, ModelState.Missing)
     }
 
@@ -187,47 +187,69 @@ class ModelManager(private val context: Context) {
     /** True if this APK ships with models in assets/models (offline builds). */
     val hasBundledModels: Boolean by lazy { (context.assets.list("models") ?: emptyArray()).any { it.endsWith(".onnx") } }
 
+    private fun isModelFile(name: String) = name.endsWith(".onnx") || name.endsWith(".tflite") || name.endsWith(".tflite.json")
+    private fun idOf(name: String) = name.removeSuffix(".json").removeSuffix(".tflite").removeSuffix(".onnx")
+
     /** Copies models bundled in the APK into app storage (first launch / after update). Idempotent. */
     suspend fun installBundled() = withContext(Dispatchers.IO) {
-        val bundled = context.assets.list("models")?.toSet() ?: return@withContext
-        // TFLite twins first (silent), then ONNX models
-        for (name in bundled.filter { it.endsWith(".tflite") }) {
-            val f = File(dir, name)
-            if (!f.exists()) runCatching { context.assets.open("models/$name").use { i -> File(dir, "$name.part").outputStream().use { i.copyTo(it, 1 shl 20) } }; File(dir, "$name.part").renameTo(f) }
-        }
-        for (spec in ModelCatalog.all) {
-            if (spec.fileName !in bundled || file(spec).exists()) continue
-            set(spec.id, ModelState.Installing)
+        val bundled = context.assets.list("models")?.filter(::isModelFile) ?: return@withContext
+        // TFLite twins + mappings first (silent), then ONNX models (shown as Installing)
+        for (name in bundled.sortedBy { if (it.endsWith(".onnx")) 1 else 0 }) {
+            val target = File(dir, name)
+            if (target.exists()) continue
+            val spec = ModelCatalog.byId(idOf(name))
+            if (name.endsWith(".onnx") && spec != null) set(spec.id, ModelState.Installing)
             try {
-                val part = File(dir, spec.fileName + ".part")
-                context.assets.open("models/${spec.fileName}").use { input -> part.outputStream().use { input.copyTo(it, 1 shl 20) } }
-                check(part.renameTo(file(spec)))
-                set(spec.id, ModelState.Ready)
+                val part = File(dir, "$name.part")
+                context.assets.open("models/$name").use { input -> part.outputStream().use { input.copyTo(it, 1 shl 20) } }
+                check(part.renameTo(target))
+                if (name.endsWith(".onnx") && spec != null) set(spec.id, ModelState.Ready)
             } catch (t: Throwable) {
-                set(spec.id, ModelState.Failed("Install failed: ${t.message}"))
+                if (spec != null && name.endsWith(".onnx")) set(spec.id, ModelState.Failed("Install failed: ${t.message}"))
             }
         }
     }
 
-    /** Imports .onnx files picked from device storage (USB-copied), matched by file name. Returns names imported. */
+    /**
+     * Imports model files picked from device storage (USB-copied): single .onnx / .tflite / .tflite.json files or
+     * model-pack .zip files (stored, as built by CI). Matched to the catalog by file name. Returns names imported.
+     */
     suspend fun importFromUris(uris: List<android.net.Uri>): List<String> = withContext(Dispatchers.IO) {
         val done = ArrayList<String>()
+        fun store(name: String, write: (File) -> Unit) {
+            val base = if (name == "arcface.onnx") "mobilefaceswap_arcface.onnx" else name
+            val spec = ModelCatalog.byId(idOf(base)) ?: return
+            if (base.endsWith(".onnx")) set(spec.id, ModelState.Installing)
+            try {
+                val part = File(dir, "$base.part")
+                write(part)
+                File(dir, base).delete()
+                check(part.renameTo(File(dir, base)))
+                if (spec.id.startsWith("inswapper") && base.endsWith(".onnx")) emapCache.delete()
+                done += base
+            } catch (t: Throwable) {
+                set(spec.id, ModelState.Failed("Import failed: ${t.message}"))
+            } finally {
+                if (file(spec).exists()) set(spec.id, ModelState.Ready)
+            }
+        }
         for (uri in uris) {
             val name = context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
                 if (c.moveToFirst()) c.getString(0) else null
-            } ?: continue
-            val spec = ModelCatalog.all.firstOrNull { it.fileName.equals(name, ignoreCase = true) } ?: continue
-            set(spec.id, ModelState.Installing)
-            try {
-                val part = File(dir, spec.fileName + ".part")
-                context.contentResolver.openInputStream(uri)!!.use { input -> part.outputStream().use { input.copyTo(it, 1 shl 20) } }
-                file(spec).delete()
-                check(part.renameTo(file(spec)))
-                if (spec.id.startsWith("inswapper")) emapCache.delete()
-        File(dir, "${spec.id}.tflite").delete()
-                set(spec.id, ModelState.Ready); done += spec.fileName
-            } catch (t: Throwable) {
-                set(spec.id, ModelState.Failed("Import failed: ${t.message}"))
+            }?.substringAfterLast('/') ?: continue
+            if (name.endsWith(".zip", ignoreCase = true)) {
+                context.contentResolver.openInputStream(uri)?.use { raw ->
+                    java.util.zip.ZipInputStream(raw.buffered(1 shl 20)).use { zip ->
+                        while (true) {
+                            val entry = zip.nextEntry ?: break
+                            val base = entry.name.substringAfterLast('/')
+                            if (entry.isDirectory || !isModelFile(base)) continue
+                            store(base) { f -> f.outputStream().use { zip.copyTo(it, 1 shl 20) } }
+                        }
+                    }
+                }
+            } else if (isModelFile(name)) {
+                store(name) { f -> context.contentResolver.openInputStream(uri)!!.use { input -> f.outputStream().use { input.copyTo(it, 1 shl 20) } } }
             }
         }
         done
