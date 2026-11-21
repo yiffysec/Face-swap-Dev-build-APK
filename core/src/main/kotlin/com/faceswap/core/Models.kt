@@ -33,7 +33,14 @@ private fun OrtSession.Result.floatAt(i: Int): FloatArray {
 /** SCRFD face detector (InsightFace). Outputs: scores×3, boxes×3, keypoints×3 for strides 8/16/32. */
 class FaceDetector(env: OrtEnvironment, file: File, factory: SessionFactory) : OnnxModel(env, file, factory) {
 
-    fun detect(img: RgbImage, inputSize: Int = 640, scoreThreshold: Float = 0.5f, nmsThreshold: Float = 0.4f): List<Face> {
+    /** Set when the model was exported/prepared with a static input size (needed for full NPU offload). */
+    private val fixedSize: Int? = runCatching {
+        val shape = (session.inputInfo[inputNames[0]]!!.info as ai.onnxruntime.TensorInfo).shape
+        if (shape.size == 4 && shape[2] > 0) shape[2].toInt() else null
+    }.getOrNull()
+
+    fun detect(img: RgbImage, requestedSize: Int = 640, scoreThreshold: Float = 0.5f, nmsThreshold: Float = 0.4f): List<Face> {
+        val inputSize = fixedSize ?: requestedSize
         val ratio = min(inputSize.toFloat() / img.width, inputSize.toFloat() / img.height)
         // letterbox: scale, pad right/bottom with black
         val scaled = ImageOps.warpAffine(img, Affine.scale(ratio), inputSize, inputSize)

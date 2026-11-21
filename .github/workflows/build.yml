@@ -45,7 +45,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .models-cache
-          key: onnx-models-facefusion-3.0.0-v1
+          key: onnx-models-facefusion-3.0.0-static-v2
 
       - name: Write local.properties
         env:
@@ -54,9 +54,14 @@ jobs:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           if [ -n "$DEV_PASSPHRASE" ]; then echo "DEV_PASSPHRASE=$DEV_PASSPHRASE" >> local.properties; fi
 
-      - name: Core unit tests (real models)
+      - name: Download + prepare models (static shapes for NPU offload)
         run: |
           ./gradlew :app:fetchModels -PbundleModels=true -PbundleEnhancer=$BUNDLE_ENHANCER --console=plain
+          pip install -q onnx onnxruntime
+          python3 tools/prepare_models.py $MODELS_CACHE
+
+      - name: Core unit tests (real models)
+        run: |
           mkdir -p $MODELS_CACHE/ex
           if [ ! -f $MODELS_CACHE/ex/target.jpg ]; then
             curl -sL -o $MODELS_CACHE/ex/source.jpg https://huggingface.co/facefusion/examples-3.0.0/resolve/main/source.jpg

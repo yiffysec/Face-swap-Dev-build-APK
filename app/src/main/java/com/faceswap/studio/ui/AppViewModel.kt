@@ -138,6 +138,37 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         throw IllegalStateException("Not enough memory to load the models – close other apps and try again")
     } finally { _engineLoading.value = false }
 
+    // ---------------------------------------------------------------- device tuning
+    val tuning = a.tuning
+    private val _tuningSummary = MutableStateFlow(summary()); val tuningSummary = _tuningSummary.asStateFlow()
+    private var tunerLaunches = 0
+
+    private fun summary(): String? {
+        val best = a.tuning.best()
+        if (best.isEmpty()) return null
+        val trials = a.tuning.trials()
+        return best.entries.joinToString("\n") { (m, b) ->
+            val ms = trials.firstOrNull { it.model == m && it.backend == b }?.avgMs
+            val cpu = trials.firstOrNull { it.model == m && it.backend == com.faceswap.studio.engine.Backend.CPU && it.status == "ok" }?.avgMs
+            "$m → ${b.label}" + (ms?.let { " · ${"%.0f".format(it)} ms" } ?: "") +
+                (if (cpu != null && ms != null && b != com.faceswap.studio.engine.Backend.CPU) " (${"%.1f".format(cpu / ms)}× vs CPU)" else "")
+        } + if (!a.tuning.isComplete()) "\n(incomplete)" else ""
+    }
+
+    /** Called before (re)starting the tuner. Returns false when it should stop retrying. */
+    fun beginTuning(fresh: Boolean): Boolean {
+        if (fresh) { tunerLaunches = 0; a.tuning.reset() }
+        if (tunerLaunches++ >= 10) { toast("Tuning stopped after repeated crashes – results so far are used"); return false }
+        viewModelScope.launch { a.engine.release() } // free memory for the tuner process
+        return true
+    }
+
+    fun onTunerFinished(ok: Boolean): Boolean {
+        _tuningSummary.value = summary()
+        if (ok || a.tuning.isComplete()) { toast("Device tuning complete"); return false }
+        return true // crashed / closed: caller relaunches to continue
+    }
+
     // ---------------------------------------------------------------- internal testing
     fun unlockInternal(pass: String): Boolean {
         val ok = InternalTesting.AVAILABLE && InternalTesting.checkPassphrase(pass)

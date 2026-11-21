@@ -37,6 +37,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Isolated process: a backend that crashes natively during tuning can't take the app down. -->
+        <activity
+            android:name=".engine.TunerActivity"
+            android:exported="false"
+            android:process=":tuner"
+            android:screenOrientation="portrait" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

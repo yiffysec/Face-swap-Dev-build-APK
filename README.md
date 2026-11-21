@@ -11,7 +11,8 @@ On-device photo and video face swapping for Android. All inference runs locally 
 - **Multi-photo sources** – select several library entries of the same person and they are averaged into one identity for a better likeness.
 - **Quality presets** – Fast (128px), Balanced (2× pixel boost), High (boost + GFPGAN), Ultra (4× boost + GFPGAN).
 - **Blending controls** – box / oval / combined mask, feather, forehead/chin trim, swap strength, colour match, sharpen, enhancer blend.
-- **Acceleration** – CPU, XNNPACK, NNAPI (automatic CPU fallback), thread count.
+- **Device tuning** – *Settings → Tune for this device* benchmarks every model on CPU / XNNPACK / NNAPI fp32 / NNAPI fp16 (Pixel TPU, Snapdragon NPU) in an isolated `:tuner` process. Output is checked against CPU, and the fastest correct backend per model is used in *Auto* mode. A backend that crashes only kills the tuner, which restarts and skips it. Threads default to the number of big cores.
+- **Diagnostics** – crash reports (Java stack traces, Android 11+ native-crash / low-memory exit reasons, last pipeline steps) are shown on next launch with copy/share and under Settings. Nothing leaves the device.
 - **Offline** – models bundled into the APK at build time, or imported from storage over USB.
 
 ## Content policy (explicit targets)
@@ -40,6 +41,8 @@ Implement `com.faceswap.core.IdentityVerifier` around your KYC provider. Its `cu
 ./gradlew :app:assembleDebug -PbundleModels=false    # ~116 MB, models fetched in-app
 ./gradlew :core:test -Dmodels.dir=$HOME/.cache/faceswap-models   # JVM tests with real models
 ```
+
+`tools/prepare_models.py` fixes dynamic input shapes (SCRFD 640², ArcFace and open_nsfw batch 1) so NNAPI can offload whole graphs. CI runs it automatically; run it on `~/.cache/faceswap-models` for local builds.
 
 GitHub Actions (`.github/workflows/build.yml`) builds on every push, caches the models, runs the core tests and uploads the APK as an artifact. Use **Run workflow** to toggle model bundling.
 

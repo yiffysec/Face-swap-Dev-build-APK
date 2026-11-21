@@ -67,7 +67,7 @@ kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarg
 
 dependencies {
     implementation(project(":core"))
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.32.0")
 
     val bom = platform("androidx.compose:compose-bom:2026.01.01")
     implementation(bom)

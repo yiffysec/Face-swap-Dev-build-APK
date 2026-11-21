@@ -1,7 +1,5 @@
 package com.faceswap.studio.engine
 
-import ai.onnxruntime.OrtSession
-import ai.onnxruntime.providers.NNAPIFlags
 import android.util.Log
 import com.faceswap.core.FaceSwapEngine
 import com.faceswap.core.IdentityVerifier
@@ -17,13 +15,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.util.EnumSet
 
 /** Lazily builds (and rebuilds on accelerator change) the face swap engine. */
-class EngineHolder(private val models: ModelManager) {
+class EngineHolder(private val models: ModelManager, private val tuning: TuningStore) {
     private val mutex = Mutex()
     private var engine: FaceSwapEngine? = null
-    private var builtWith: Pair<Accelerator, Int>? = null
+    private var builtWith: Triple<Accelerator, Int, Long>? = null
 
     /** Production identity verification provider plugs in here (Persona / Onfido / Veriff wrapper). */
     var verifier: IdentityVerifier = NoIdentityVerifier
@@ -34,7 +31,7 @@ class EngineHolder(private val models: ModelManager) {
 
     suspend fun get(settings: AppSettings): FaceSwapEngine = mutex.withLock {
         withContext(Dispatchers.Default) {
-            val key = settings.accelerator to settings.threads
+            val key = Triple(settings.accelerator, settings.threads, tuning.version)
             engine?.let { if (builtWith == key) return@withContext it }
             engine?.close(); engine = null
             check(models.requiredReady) { "Required models are not downloaded yet" }
@@ -59,28 +56,25 @@ class EngineHolder(private val models: ModelManager) {
 
     suspend fun release() = mutex.withLock { engine?.close(); engine = null; builtWith = null }
 
-    private fun factory(acc: Accelerator, threads: Int) = SessionFactory { env, path ->
-        fun base() = OrtSession.SessionOptions().apply {
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            setIntraOpNumThreads(threads)
-        }
-        val name = java.io.File(path).name
-        Diagnostics.crumb("model load start: $name ($acc)")
-        try {
-            val opts = base()
-            when (acc) {
-                Accelerator.CPU -> Unit
-                Accelerator.XNNPACK -> {
-                    opts.setIntraOpNumThreads(1)
-                    opts.addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
-                }
-                Accelerator.NNAPI -> opts.addNnapi(EnumSet.of(NNAPIFlags.USE_FP16))
+    private fun factory(acc: Accelerator, threads: Int): SessionFactory {
+        val tuned = tuning.best()
+        return SessionFactory { env, path ->
+            val name = java.io.File(path).name
+            val id = name.removeSuffix(".onnx")
+            val backend = when (acc) {
+                Accelerator.AUTO -> tuned[id] ?: Backend.CPU
+                Accelerator.CPU -> Backend.CPU
+                Accelerator.XNNPACK -> Backend.XNNPACK
+                Accelerator.NNAPI -> Backend.NNAPI_FP16
             }
-            env.createSession(path, opts).also { Diagnostics.crumb("model load ok: $name") }
-        } catch (t: Throwable) {
-            Log.w("EngineHolder", "Accelerator $acc failed for $path, falling back to CPU", t)
-            Diagnostics.crumb("model load failed with $acc (${t.message}), retrying on CPU: $name")
-            env.createSession(path, base()).also { Diagnostics.crumb("model load ok (CPU fallback): $name") }
+            Diagnostics.crumb("model load start: $name ($backend, $threads threads)")
+            try {
+                env.createSession(path, Backends.options(backend, threads)).also { Diagnostics.crumb("model load ok: $name") }
+            } catch (t: Throwable) {
+                Log.w("EngineHolder", "$backend failed for $name, falling back to CPU", t)
+                Diagnostics.crumb("model load failed with $backend (${t.message}), retrying on CPU: $name")
+                env.createSession(path, Backends.options(Backend.CPU, threads)).also { Diagnostics.crumb("model load ok (CPU fallback): $name") }
+            }
         }
     }
 }
