@@ -129,6 +129,8 @@ val coreModels = linkedMapOf(
     "modnet" to ff("3.5.0", "modnet.onnx"),
     "span_kendata_x4" to ff("3.0.0", "span_kendata_x4.onnx"),
     "real_esrgan_x2_fp16" to ff("3.0.0", "real_esrgan_x2_fp16.onnx"),
+    // Qualcomm AI Hub zip (ONNX + external data) – merged into one file by tools/fetch_qualcomm.py
+    "real_esrgan_general_x4v3" to "qualcomm:",
 )
 val extraModels = linkedMapOf(
     "inswapper_128_fp16" to ff("3.0.0", "inswapper_128_fp16.onnx"),
@@ -157,6 +159,12 @@ val modelsCache = file(System.getenv("MODELS_CACHE") ?: "${System.getProperty("u
 fun download(id: String, url: String, cache: File) {
     val cached = File(cache, "$id.onnx")
     if (cached.exists() && cached.length() > 0L) return
+    if (url.startsWith("qualcomm:")) {
+        logger.lifecycle("Fetching $id (Qualcomm AI Hub) …")
+        val p = ProcessBuilder("python3", rootProject.file("tools/fetch_qualcomm.py").absolutePath, cache.absolutePath).inheritIO().start()
+        check(p.waitFor() == 0 && cached.exists()) { "tools/fetch_qualcomm.py failed for $id (needs python3 + onnx)" }
+        return
+    }
     logger.lifecycle("Downloading $id.onnx …")
     val tmp = File(cache, "$id.onnx.part")
     URI(url).toURL().openStream().use { input -> tmp.outputStream().use { input.copyTo(it, 1 shl 20) } }

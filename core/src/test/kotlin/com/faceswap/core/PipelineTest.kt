@@ -160,6 +160,19 @@ class PipelineTest {
                 assertEquals(640, up.width)
                 save(up, "frame_span_x4.png")
             }
+            if (e.has(ModelIds.ESRGAN_GENERAL_X4)) {
+                val small = ImageOps.resize(tgt, 160, 85)
+                val t = System.currentTimeMillis()
+                val up = p().enhanceFrame(small, ModelIds.ESRGAN_GENERAL_X4)
+                println("frame enhancer esrgan-general x4 160x85 -> ${up.width}x${up.height} in ${System.currentTimeMillis() - t} ms")
+                assertEquals(640, up.width)
+                // upscaled result must still be the same picture (downscaled back vs input)
+                val back = ImageOps.resize(up, 160, 85)
+                val err = back.pixels.indices.sumOf { i -> (0..2).sumOf { c -> kotlin.math.abs(((back.pixels[i] shr (8 * c)) and 0xFF) - ((small.pixels[i] shr (8 * c)) and 0xFF)) } } / (back.pixels.size * 3.0)
+                println("  mean abs error vs input $err")
+                assertTrue(err < 12.0)
+                save(up, "frame_esrgan_general_x4.png")
+            }
             if (e.has(ModelIds.ESRGAN_X2)) {
                 val small = ImageOps.resize(tgt, 160, 85)
                 val up = p().enhanceFrame(small, ModelIds.ESRGAN_X2)

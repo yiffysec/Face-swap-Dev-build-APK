@@ -61,6 +61,8 @@ object ModelCatalog {
         ModelSpec.facefusion("3.5.0", "modnet", "MODNet", "Background removal / blur / replace (portrait matting)", REC, 25_900_000, "Apache-2.0", core = true),
         ModelSpec.facefusion("3.0.0", "span_kendata_x4", "SPAN ×4", "Tiny, fast 4× photo upscaler", REC, 1_700_000, "Non-commercial", core = true),
         ModelSpec.facefusion("3.0.0", "real_esrgan_x2_fp16", "Real-ESRGAN ×2", "High-quality 2× upscaler", REC, 36_100_000, "BSD-3", core = true),
+        ModelSpec("real_esrgan_general_x4v3", "Real-ESRGAN General ×4", "Fast 4× upscaler (Qualcomm AI Hub, NPU-friendly)", REC, 4_992_137, "BSD-3",
+            "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/real_esrgan_general_x4v3/releases/v0.67.0/real_esrgan_general_x4v3-onnx-float.zip", core = true),
 
         ModelSpec.facefusion("3.0.0", "inswapper_128_fp16", "InSwapper 128", "Classic swapper – strongest likeness, use with pixel boost", ModelGroup.SWAPPERS, 277_680_829, "Non-commercial"),
         ModelSpec.facefusion("3.3.0", "hyperswap_1b_256", "HyperSwap 1b", "HyperSwap variant", ModelGroup.SWAPPERS, 402_700_000, "ResearchRAIL"),
@@ -127,7 +129,7 @@ class ModelManager(private val context: Context) {
     /** Bytes used by a model and all its twins. */
     fun bytesOnDisk(id: String): Long = companions(id).sumOf { it.length() }
 
-    private fun companions(id: String) = listOf("$id.onnx", "$id.tflite", "$id.tflite.json", "$id.qdq.onnx", "$id.sample.bin").map { File(dir, it) }.filter { it.exists() }
+    private fun companions(id: String) = listOf("$id.onnx", "$id.data", "$id.tflite", "$id.tflite.json", "$id.qdq.onnx", "$id.sample.bin").map { File(dir, it) }.filter { it.exists() }
 
     val totalBytes: Long get() = dir.listFiles()?.sumOf { it.length() } ?: 0L
 
@@ -193,7 +195,22 @@ class ModelManager(private val context: Context) {
                 val actual = crc32Hex(part)
                 if (actual != expectedHash) { part.delete(); error("Checksum mismatch – please retry") }
             }
-            if (!part.renameTo(target)) error("Could not finalise file")
+            if (spec.url.endsWith(".zip")) {
+                // AI Hub zips hold <name>.onnx + <name>.data (external weights); ORT resolves the .data next to the model
+                java.util.zip.ZipInputStream(part.inputStream().buffered(1 shl 20)).use { zip ->
+                    while (true) {
+                        val e = zip.nextEntry ?: break
+                        val base = e.name.substringAfterLast('/')
+                        if (e.isDirectory || !(base.endsWith(".onnx") || base.endsWith(".data"))) continue
+                        val dst = if (base.endsWith(".onnx")) target else File(dir, base)
+                        val tmp = File(dst.path + ".x")
+                        tmp.outputStream().use { zip.copyTo(it, 1 shl 20) }
+                        dst.delete(); check(tmp.renameTo(dst))
+                    }
+                }
+                part.delete()
+                check(target.exists()) { "No model in archive" }
+            } else if (!part.renameTo(target)) error("Could not finalise file")
             set(spec.id, ModelState.Ready)
         } catch (t: Throwable) {
             set(spec.id, ModelState.Failed(t.message ?: t.javaClass.simpleName))

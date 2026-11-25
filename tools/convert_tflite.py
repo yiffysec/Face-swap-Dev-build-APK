@@ -22,7 +22,7 @@ from onnx import numpy_helper
 DEFAULT_IDS = [
     "yunet_2023_mar", "scrfd_2.5g", "arcface_w600k_r50", "hrffa", "hyperswap_1a_256", "hyperswap_1b_256",
     "hyperswap_1c_256", "bisenet_resnet_18", "gpen_bfr_256", "gpen_bfr_512", "gfpgan_1.4", "modnet",
-    "span_kendata_x4", "real_esrgan_x2_fp16", "real_esrgan_x4_fp16", "open_nsfw",
+    "span_kendata_x4", "real_esrgan_x2_fp16", "real_esrgan_x4_fp16", "real_esrgan_general_x4v3", "open_nsfw",
 ]
 MAPPING_VERSION = 2  # 2 = tensors addressed by signature name (LiteRT CompiledModel runs by signature)
 

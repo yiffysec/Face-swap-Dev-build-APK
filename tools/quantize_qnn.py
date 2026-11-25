@@ -38,7 +38,7 @@ DEFAULT_IDS = [
     "hyperswap_1a_256", "hyperswap_1b_256", "hyperswap_1c_256", "inswapper_128_fp16",
     "gpen_bfr_256", "gpen_bfr_512", "gfpgan_1.4", "restoreformer_plus_plus", "codeformer",
     "arcface_w600k_r50", "bisenet_resnet_18", "hrffa", "scrfd_2.5g",
-    "modnet", "u2netp", "real_esrgan_x2_fp16", "real_esrgan_x4_fp16", "span_kendata_x4",
+    "modnet", "u2netp", "real_esrgan_x2_fp16", "real_esrgan_x4_fp16", "span_kendata_x4", "real_esrgan_general_x4v3",
     "fran", "live_portrait_motion_extractor", "live_portrait_feature_extractor", "live_portrait_generator",
 ]
 VERSION = 2

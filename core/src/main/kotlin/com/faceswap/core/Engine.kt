@@ -48,6 +48,8 @@ object ModelIds {
     const val ESRGAN_X2 = "real_esrgan_x2_fp16"
     const val ESRGAN_X4 = "real_esrgan_x4_fp16"
     const val SPAN_X4 = "span_kendata_x4"
+    /** Qualcomm AI Hub Real-ESRGAN-General-x4v3 (BSD-3): 1.2 M params, NPU-friendly. */
+    const val ESRGAN_GENERAL_X4 = "real_esrgan_general_x4v3"
     const val LP_FEATURE = "live_portrait_feature_extractor"
     const val LP_MOTION = "live_portrait_motion_extractor"
     const val LP_GENERATOR = "live_portrait_generator"
@@ -60,7 +62,7 @@ object ModelIds {
 
     val SWAPPERS = listOf(HYPERSWAP_1A, HYPERSWAP_1B, HYPERSWAP_1C, INSWAPPER)
     val ENHANCERS = listOf(GPEN_256, GFPGAN, GPEN_512, RESTOREFORMER, CODEFORMER)
-    val FRAME_ENHANCERS = listOf(ESRGAN_X2, ESRGAN_X4, SPAN_X4)
+    val FRAME_ENHANCERS = listOf(ESRGAN_GENERAL_X4, ESRGAN_X2, ESRGAN_X4, SPAN_X4)
 }
 
 data class SwapConfig(

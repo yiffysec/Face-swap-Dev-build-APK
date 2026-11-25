@@ -125,7 +125,7 @@ fun StudioTools(vm: AppViewModel, nav: Navigator) {
                     }
                 }
                 Tool.UPSCALE -> {
-                    val options = listOf(ModelIds.SPAN_X4 to "SPAN ×4 (fast)", ModelIds.ESRGAN_X2 to "Real-ESRGAN ×2", ModelIds.ESRGAN_X4 to "Real-ESRGAN ×4").filter { m.has(it.first) }
+                    val options = listOf(ModelIds.ESRGAN_GENERAL_X4 to "General ×4 (fastest)", ModelIds.SPAN_X4 to "SPAN ×4", ModelIds.ESRGAN_X2 to "Real-ESRGAN ×2", ModelIds.ESRGAN_X4 to "Real-ESRGAN ×4").filter { m.has(it.first) }
                     if (options.isEmpty()) Missing("an upscaler") else FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         options.forEach { (id, l) -> OutlinedButton(onClick = { vm.applyStudio(AppViewModel.StudioOp.Upscale(id)) }) { Text(l) } }
                     }
