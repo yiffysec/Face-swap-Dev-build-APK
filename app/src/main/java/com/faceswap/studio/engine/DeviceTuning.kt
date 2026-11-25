@@ -118,7 +118,7 @@ object Backends {
     }
 
     /** Options newer than some QNN EP builds: dropped on retry if the EP rejects them. */
-    private val optionalQnnKeys = setOf("enable_htp_fp16_clamp_overflow", "htp_graph_finalization_optimization_mode", "qnn_context_priority")
+    private val optionalQnnKeys = setOf("enable_htp_fp16_clamp_overflow", "htp_graph_finalization_optimization_mode", "qnn_context_priority", "offload_graph_io_quantization")
 
     private fun qnnOptions(backend: Backend): Map<String, String> = when (backend) {
         Backend.QNN_GPU -> mapOf("backend_type" to "gpu", "backend_path" to "libQnnGpu.so", "qnn_context_priority" to "high")
@@ -131,7 +131,11 @@ object Backends {
             // QAIRT 2.49+: clamp fp16 conv overflow to ±65504 instead of producing Inf/NaN (GAN restorers)
             "enable_htp_fp16_clamp_overflow" to "1",
             "qnn_context_priority" to "high",
-        )
+        ) + if (backend == Backend.QNN_HTP_INT8) mapOf(
+            // INT8 graphs: input quantize / output dequantize on the NPU too, so the whole graph is offloaded
+            // (with CPU-side Q/DQ the strict full-offload check could never pass)
+            "offload_graph_io_quantization" to "0",
+        ) else emptyMap()
     }
 
     /**

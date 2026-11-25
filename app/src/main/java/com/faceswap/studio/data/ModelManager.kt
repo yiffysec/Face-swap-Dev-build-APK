@@ -213,25 +213,31 @@ class ModelManager(private val context: Context) {
     /** Copies models bundled in the APK into app storage (first launch / after update). Idempotent. */
     suspend fun installBundled() = withContext(Dispatchers.IO) {
         val bundled = context.assets.list("models")?.filter(::isModelFile) ?: return@withContext
-        // Twins (TFLite + mapping, INT8, sample inputs) first and silently, then the main models (shown as Installing).
-        // A twin is re-copied when the APK ships a different size (new CI conversion) – the NPU cache is then rebuilt.
-        for (name in bundled.sortedBy { if (isPrimary(it)) 1 else 0 }) {
+        // Twins (TFLite + mapping, INT8, sample inputs) first, then the main model – a model shows Ready only once
+        // everything that belongs to it is in place. Any file is re-copied when the APK ships a different size (new CI
+        // build of the model or twin); compiled NPU graphs for it are then rebuilt.
+        val todo = bundled.sortedBy { if (isPrimary(it)) 1 else 0 }.filter { name ->
             val target = File(dir, name)
             val assetSize = runCatching { context.assets.openFd("models/$name").use { it.length } }.getOrDefault(-1L)
-            if (target.exists() && (isPrimary(name) || assetSize < 0 || target.length() == assetSize)) continue
+            !(target.exists() && (assetSize < 0 || target.length() == assetSize))
+        }
+        todo.mapNotNull { ModelCatalog.byId(idOf(it)) }.distinct().forEach { set(it.id, ModelState.Installing) }
+        val failed = HashSet<String>()
+        for (name in todo) {
+            val target = File(dir, name)
             val spec = ModelCatalog.byId(idOf(name))
-            if (isPrimary(name) && spec != null) set(spec.id, ModelState.Installing)
             try {
                 val part = File(dir, "$name.part")
                 context.assets.open("models/$name").use { input -> part.outputStream().use { input.copyTo(it, 1 shl 20) } }
                 target.delete()
                 check(part.renameTo(target))
-                if (!isPrimary(name)) com.faceswap.studio.engine.Backends.clearCompiled(context, idOf(name))
-                if (isPrimary(name) && spec != null) set(spec.id, ModelState.Ready)
+                com.faceswap.studio.engine.Backends.clearCompiled(context, idOf(name))
+                if (isPrimary(name) && idOf(name).startsWith("inswapper")) emapCache.delete()
             } catch (t: Throwable) {
-                if (spec != null && isPrimary(name)) set(spec.id, ModelState.Failed("Install failed: ${t.message}"))
+                if (spec != null) { failed += spec.id; set(spec.id, ModelState.Failed("Install failed: ${t.message}")) }
             }
         }
+        todo.mapNotNull { ModelCatalog.byId(idOf(it)) }.distinct().filter { it.id !in failed }.forEach { set(it.id, initial(it)) }
     }
 
     /**
