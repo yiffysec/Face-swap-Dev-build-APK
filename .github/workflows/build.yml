@@ -9,6 +9,10 @@ on:
         description: "Convert models to TFLite (LiteRT GPU twins)"
         type: boolean
         default: true
+      quantize_npu:
+        description: "Build calibrated int8 (w8a16) NPU twins"
+        type: boolean
+        default: true
 
 concurrency:
   group: build-${{ github.ref }}
@@ -20,9 +24,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       MODELS_CACHE: ${{ github.workspace }}/.models-cache
+      CALIB_DIR: ${{ github.workspace }}/.calib
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
@@ -37,18 +42,29 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - uses: android-actions/setup-android@v3
         with:
           packages: "platforms;android-36 build-tools;36.0.0 platform-tools"
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Cache models (ONNX + prepared + TFLite twins)
+      # Pinned toolchain: an unpinned tf_keras newer than TensorFlow broke every conversion in a previous run.
+      - name: Python tooling (pinned)
+        run: |
+          pip install -q "numpy==2.2.6" "onnx==1.20.1" "onnxruntime==1.26.0" "onnxsim==0.6.5" \
+            "tensorflow-cpu==2.21.0" "tf_keras==2.21.0" "onnx2tf==2.6.9" "onnx_graphsurgeon==0.6.1" "sng4onnx==2.0.1" "psutil" "ai-edge-litert==2.1.2"
+          python3 -c "import tensorflow as tf, tf_keras, onnx2tf, onnxruntime as o; print('tf', tf.__version__, 'ort', o.__version__)"
+
+      - name: Cache models (ONNX + prepared + GPU / NPU twins)
         uses: actions/cache@v4
         with:
           path: .models-cache
-          key: models-v4-${{ hashFiles('tools/*.py') }}
-          restore-keys: models-v4-
+          key: models-v5-${{ hashFiles('tools/*.py', 'core/src/test/kotlin/com/faceswap/core/CalibrationDump.kt') }}
+          restore-keys: models-v5-
 
       - name: Write local.properties
         env:
@@ -61,29 +77,62 @@ jobs:
         run: ./gradlew :app:fetchModels :app:fetchExtraModels --console=plain
 
       - name: Prepare models (static shapes for NPU offload)
+        run: python3 tools/prepare_models.py $MODELS_CACHE
+
+      - name: Example media (tests + calibration frames)
         run: |
-          pip install -q onnx onnxruntime
-          python3 tools/prepare_models.py $MODELS_CACHE
+          mkdir -p $MODELS_CACHE/ex/frames
+          command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null)
+          if [ ! -f $MODELS_CACHE/ex/target.jpg ]; then
+            curl -sL -o $MODELS_CACHE/ex/source.jpg https://huggingface.co/facefusion/examples-3.0.0/resolve/main/source.jpg
+            curl -sL -o /tmp/t.mp4 https://huggingface.co/facefusion/examples-3.0.0/resolve/main/target-240p.mp4
+            ffmpeg -loglevel error -y -ss 1 -i /tmp/t.mp4 -frames:v 1 $MODELS_CACHE/ex/target.jpg
+          fi
+          if [ -z "$(ls $MODELS_CACHE/ex/frames)" ]; then
+            curl -sL -o /tmp/t720.mp4 https://huggingface.co/facefusion/examples-3.0.0/resolve/main/target-720p.mp4
+            ffmpeg -loglevel error -y -i /tmp/t720.mp4 -vf "fps=1.5,scale=960:-2" -frames:v 12 $MODELS_CACHE/ex/frames/f%02d.jpg
+          fi
+          ls $MODELS_CACHE/ex/frames | wc -l
 
       - name: Convert to TFLite for LiteRT GPU (best effort)
         if: github.event_name != 'workflow_dispatch' || inputs.convert_tflite
         continue-on-error: true
-        timeout-minutes: 60
+        timeout-minutes: 75
         run: |
-          pip install -q "tensorflow-cpu" tf_keras onnx2tf onnx_graphsurgeon sng4onnx psutil ai-edge-litert
           python3 tools/convert_tflite.py $MODELS_CACHE 2>/dev/null | grep -vE "W:onnx|WARNING" | tee tflite-report.txt
           ls -la $MODELS_CACHE/*.tflite || true
 
-      - name: Core unit tests (real models)
+      - name: Capture calibration data from the real pipeline
+        if: github.event_name != 'workflow_dispatch' || inputs.quantize_npu
+        continue-on-error: true
+        timeout-minutes: 60
         run: |
-          mkdir -p $MODELS_CACHE/ex
-          if [ ! -f $MODELS_CACHE/ex/target.jpg ]; then
-            curl -sL -o $MODELS_CACHE/ex/source.jpg https://huggingface.co/facefusion/examples-3.0.0/resolve/main/source.jpg
-            curl -sL -o /tmp/t.mp4 https://huggingface.co/facefusion/examples-3.0.0/resolve/main/target-240p.mp4
-            command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null)
-            ffmpeg -loglevel error -y -ss 1 -i /tmp/t.mp4 -frames:v 1 $MODELS_CACHE/ex/target.jpg
+          # re-capture only when the quantizer / capture code changed (twins are cached with the models)
+          want=$(cat tools/quantize_qnn.py core/src/test/kotlin/com/faceswap/core/CalibrationDump.kt | sha256sum | cut -c1-16)
+          if [ "$(cat $MODELS_CACHE/.calib-stamp 2>/dev/null)" != "$want" ]; then
+            ./gradlew :core:test --tests '*CalibrationDump*' -Dmodels.dir=$MODELS_CACHE -Dcalib.dir=$CALIB_DIR \
+              -Dcalib.samples=36 -Dcalib.mb=96 -Dtest.heap=4g --console=plain | grep -E "calibration|PASSED|FAILED" || true
+            echo "$want" > $MODELS_CACHE/.calib-stamp.pending
+          else
+            echo "NPU twins up to date"
           fi
-          ./gradlew :core:test -Dmodels.dir=$MODELS_CACHE --console=plain
+          du -sh $CALIB_DIR/* 2>/dev/null || true
+
+      - name: Quantize for the Snapdragon NPU (w8a16 QDQ, quality-gated)
+        if: github.event_name != 'workflow_dispatch' || inputs.quantize_npu
+        continue-on-error: true
+        timeout-minutes: 90
+        run: |
+          if [ -d $CALIB_DIR ]; then
+            python3 tools/quantize_qnn.py $MODELS_CACHE $CALIB_DIR 2>&1 | grep -vE "W:onnx|WARNING|^\s*$" || true
+            [ -f $MODELS_CACHE/.calib-stamp.pending ] && mv $MODELS_CACHE/.calib-stamp.pending $MODELS_CACHE/.calib-stamp
+          fi
+          cp $MODELS_CACHE/qnn-report.txt . 2>/dev/null || true
+          rm -rf $CALIB_DIR   # large; never cached
+          ls -la $MODELS_CACHE/*.qdq.onnx 2>/dev/null || true
+
+      - name: Core unit tests (real models)
+        run: ./gradlew :core:test -Dmodels.dir=$MODELS_CACHE -Dtest.heap=4g --console=plain
 
       - name: Build internal APKs (universal + snapdragon)
         run: ./gradlew :app:assembleUniversalDebug :app:assembleSnapdragonDebug --console=plain
@@ -92,12 +141,20 @@ jobs:
         run: |
           mkdir -p packs
           cd $MODELS_CACHE
-          pack() { name=$1; shift; files=""; for id in "$@"; do for f in $id.onnx $id.tflite $id.tflite.json; do [ -f "$f" ] && files="$files $f"; done; done; [ -n "$files" ] && zip -0 -q $GITHUB_WORKSPACE/packs/$name.zip $files; }
-          pack models-swappers inswapper_128_fp16 hyperswap_1b_256 hyperswap_1c_256
-          pack models-enhancers gfpgan_1.4 gpen_bfr_512 restoreformer_plus_plus codeformer
-          pack models-studio fran u2netp real_esrgan_x4_fp16 live_portrait_feature_extractor live_portrait_motion_extractor live_portrait_generator live_portrait_stitcher live_portrait_eye_retargeter live_portrait_lip_retargeter
+          pack() { name=$1; shift; files=""; for id in "$@"; do for f in $id.onnx $id.tflite $id.tflite.json $id.sample.bin; do [ -f "$f" ] && files="$files $f"; done; done; [ -n "$files" ] && zip -0 -q -X $GITHUB_WORKSPACE/packs/$name.zip $files; }
+          packnpu() { name=$1; shift; files=""; for id in "$@"; do [ -f "$id.qdq.onnx" ] && files="$files $id.qdq.onnx"; done; [ -n "$files" ] && zip -0 -q -X $GITHUB_WORKSPACE/packs/$name.zip $files; }
+          SW="inswapper_128_fp16 hyperswap_1b_256 hyperswap_1c_256"
+          EN="gfpgan_1.4 gpen_bfr_512 restoreformer_plus_plus codeformer"
+          ST="fran u2netp real_esrgan_x4_fp16 live_portrait_feature_extractor live_portrait_motion_extractor live_portrait_generator live_portrait_stitcher live_portrait_eye_retargeter live_portrait_lip_retargeter"
+          pack models-swappers $SW
+          pack models-enhancers $EN
+          pack models-studio $ST
           pack models-live MobileFaceSwapUNetRuntime BuildFaceSwap mobilefaceswap_arcface
-          ls -la $GITHUB_WORKSPACE/packs
+          packnpu models-npu-int8 $SW $EN $ST
+          cd $GITHUB_WORKSPACE/packs
+          # content manifest: a pack is re-uploaded only when what's inside changed
+          for p in *.zip; do echo "$(unzip -Z1 $p | sort | xargs -I{} sh -c 'stat -c "%n %s" $MODELS_CACHE/{}' | sha256sum | cut -c1-16) $p"; done > packs.manifest
+          cat packs.manifest; ls -la
 
       - name: Publish rolling internal release
         run: |
@@ -106,17 +163,18 @@ jobs:
           mkdir -p out
           cp app/build/outputs/apk/universal/debug/*.apk out/FaceSwapStudio-universal-$BRANCH.apk
           cp app/build/outputs/apk/snapdragon/debug/*.apk out/FaceSwapStudio-snapdragon-$BRANCH.apk
-          NOTES="Internal build of $BRANCH @ ${GITHUB_SHA::7}. universal = Pixel 8 Pro (LiteRT GPU / NNAPI / XNNPACK). snapdragon = Galaxy S24 Ultra (QNN HTP NPU). Model packs: import via Models → Import (USB, offline)."
+          NOTES="Internal build of $BRANCH @ ${GITHUB_SHA::7}. universal = Pixel 8 Pro (LiteRT GPU / NNAPI TPU / XNNPACK). snapdragon = Galaxy S24 Ultra (QNN NPU, int8 twins). Model packs: Settings → Models → Import (USB, offline). After installing, run Settings → Performance → Tune."
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$NOTES" --prerelease
           else
             gh release create "$TAG" --title "Internal – $BRANCH" --notes "$NOTES" --prerelease --target "$GITHUB_SHA"
           fi
           gh release upload "$TAG" out/*.apk --clobber
-          # model packs rarely change: only upload the ones the release doesn't have yet
-          existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-          for p in packs/*.zip; do
-            n=$(basename $p)
-            echo "$existing" | grep -qx "$n" || gh release upload "$TAG" "$p"
-          done
-          [ -f tflite-report.txt ] && gh release upload "$TAG" tflite-report.txt --clobber || true
+          # packs: upload new or changed ones only (they're GBs)
+          old=$(mktemp)
+          gh release download "$TAG" -p packs.manifest -O $old 2>/dev/null || : > $old
+          while read -r hash name; do
+            grep -qx "$hash $name" $old || gh release upload "$TAG" "packs/$name" --clobber
+          done < packs/packs.manifest
+          gh release upload "$TAG" packs/packs.manifest --clobber
+          for r in tflite-report.txt qnn-report.txt; do [ -f $r ] && gh release upload "$TAG" $r --clobber || true; done
