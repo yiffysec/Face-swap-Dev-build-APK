@@ -5,39 +5,59 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.faceswap.core.Tensor
+import com.faceswap.core.TensorFile
 import com.faceswap.studio.data.ModelCatalog
 import com.faceswap.studio.ui.theme.FaceSwapTheme
+import com.faceswap.studio.ui.theme.Good
+import com.faceswap.studio.ui.theme.Warn
 import java.io.File
 import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
- * Benchmarks every model on every backend, in the isolated `:tuner` process (see manifest), so a backend that
- * crashes natively only kills this process. The main app relaunches it, and the crashed trial is recorded and
- * skipped. Each backend's output is checked against the CPU result, so a backend that is fast but numerically
- * wrong (e.g. fp16 overflow on an NPU) is rejected.
+ * Benchmarks every installed model on every candidate backend in the isolated `:tuner` process (see manifest), so a
+ * backend that crashes natively only kills this process; the main app relaunches it and the crashed trial is
+ * recorded and skipped.
+ *
+ * Correctness: each backend's outputs (all of them) are compared to the fp32 CPU result on the model's real sample
+ * input (`<id>.sample.bin`, captured from the pipeline in CI) – fast-but-wrong backends (fp16 overflow, bad
+ * quantization) are rejected. NPU candidates are first loaded with CPU fallback disabled to prove full offload;
+ * if that fails they're retried with fallback and marked "partial".
  */
 class TunerActivity : ComponentActivity() {
-    companion object { const val RESULT_USER_CANCELLED = Activity.RESULT_FIRST_USER }
+    companion object {
+        const val RESULT_USER_CANCELLED = Activity.RESULT_FIRST_USER
+        private const val MIN_SIMILARITY = 0.995
+    }
 
-    private val rows = mutableStateListOf<String>()
+    private data class Row(val text: String, val kind: Int) // 0 info, 1 ok, 2 fail
+    private val rows = mutableStateListOf<Row>()
     private val progress = mutableStateOf(0f)
     private val headline = mutableStateOf("Preparing…")
 
@@ -50,13 +70,29 @@ class TunerActivity : ComponentActivity() {
         setContent {
             FaceSwapTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    Column(Modifier.padding(20.dp)) {
+                    Column(Modifier.statusBarsPadding().padding(20.dp)) {
                         Text("Tuning for this device", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                        Text(headline.value, Modifier.padding(vertical = 8.dp))
-                        LinearProgressIndicator(progress = { progress.value }, modifier = Modifier.fillMaxWidth())
-                        Text("Each model is timed on CPU, XNNPACK and NNAPI (TPU/NPU). NPU compilation of the large models can take a minute. If the screen closes, it restarts automatically and skips whatever crashed.",
-                            Modifier.padding(vertical = 10.dp), style = MaterialTheme.typography.bodySmall)
-                        LazyColumn { items(rows) { r -> Row { Text(r, style = MaterialTheme.typography.bodyMedium) } } }
+                        Text(CpuInfo.chipName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(12.dp))
+                        Text(headline.value, style = MaterialTheme.typography.titleSmall)
+                        LinearProgressIndicator(progress = { progress.value }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+                        Text(
+                            "Each model runs on every backend this chip offers and is checked against the CPU result on a real face. " +
+                                "NPU compilation of the big models can take a minute. If this screen closes it restarts on its own and skips what crashed. Back cancels.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        val list = rememberLazyListState()
+                        LaunchedEffect(rows.size) { if (rows.isNotEmpty()) list.animateScrollToItem(rows.size - 1) }
+                        LazyColumn(
+                            Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(12.dp)).padding(10.dp),
+                            state = list, verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            items(rows) { r ->
+                                Text(r.text, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = when (r.kind) { 1 -> Good; 2 -> Warn; else -> MaterialTheme.colorScheme.onSurface })
+                            }
+                        }
                     }
                 }
             }
@@ -78,36 +114,43 @@ class TunerActivity : ComponentActivity() {
 
         val modelsDir = File(filesDir, "models")
         val models = ModelCatalog.all.map { it.id }.filter { File(modelsDir, "$it.onnx").exists() }
-        val plan = models.associateWith { Backends.candidates(LiteRtModel.available(modelsDir, it)) }
-        val total = plan.values.sumOf { it.size }
+        val plan = models.associateWith { Backends.candidates(this, modelsDir, it) }
+        val total = plan.values.sumOf { it.size }.coerceAtLeast(1)
         val threads = CpuInfo.bigCores
-        val rnd = Random(42)
+        if (CpuInfo.isSnapdragon) ui { rows += Row("QNN: ${QnnPlugin.describe(this)}", 0) }
 
         for (model in models) {
             val file = File(modelsDir, "$model.onnx")
-            var reference: FloatArray? = null
+            val sample = File(modelsDir, "$model.sample.bin").takeIf { it.exists() }?.let { runCatching { TensorFile.read(it) }.getOrNull() }
+            var reference: List<FloatArray>? = null
             for (backend in plan.getValue(model)) {
                 val done = trials.count { it.model in models }
                 ui { progress.value = done.toFloat() / total; headline.value = "$model · ${backend.label}" }
                 val existing = trials.firstOrNull { it.model == model && it.backend == backend }
-                if (existing != null && (backend != Backend.CPU || reference != null || existing.status != "ok")) continue
-                // CPU is always run first (also after a restart) to have a reference output.
+                // CPU always runs first (also after a restart) to have a reference output.
+                if (existing != null && !(backend == Backend.CPU && reference == null && existing.ok)) continue
+                // fp32 on the GPU is only worth its cost if both fp16 variants failed verification
+                if (backend == Backend.LITERT_GPU_FP32 && trials.any { it.model == model && it.ok && (it.backend == Backend.LITERT_GPU || it.backend == Backend.LITERT_GPU_ACC32) }) continue
                 store.markInProgress(model, backend)
-                val t = runCatching { measure(file, model, backend, threads, rnd) }
+                var partial = false
+                val t = runCatching { measure(file, model, backend, threads, sample, strict = backend.isQnn) }.recoverCatching { e ->
+                    if (!backend.isQnn) throw e
+                    partial = true // some ops can't run on the NPU: measure with CPU fallback and let the numbers decide
+                    measure(file, model, backend, threads, sample, strict = false)
+                }
                 store.clearInProgress()
                 val (firstMs, avgMs, out) = t.getOrElse { e ->
-                    val tr = Trial(model, backend, "failed: ${e.message?.take(80)}", 0, Double.MAX_VALUE, 0.0)
+                    val tr = Trial(model, backend, "failed: ${(e.message ?: e.javaClass.simpleName).lines().first().take(90)}", 0, Double.MAX_VALUE, 0.0)
                     trials.removeAll { it.model == model && it.backend == backend }; trials += tr
                     store.save(trials, false); ui { rows += describe(tr) }
                     continue
                 }
                 if (backend == Backend.CPU) reference = out
-                val sim = reference?.let { cosine(it, out) } ?: 1.0
-                val status = if (sim >= 0.995) "ok" else "mismatch"
+                val sim = reference?.let { similarity(it, out) } ?: 1.0
+                val status = when { sim < MIN_SIMILARITY -> "mismatch"; partial -> "ok-partial"; else -> "ok" }
                 val tr = Trial(model, backend, status, firstMs, avgMs, sim)
-                if (trials.none { it.model == model && it.backend == backend }) {
-                    trials += tr; store.save(trials, false); ui { rows += describe(tr) }
-                }
+                trials.removeAll { it.model == model && it.backend == backend }; trials += tr
+                store.save(trials, false); ui { rows += describe(tr) }
             }
         }
         store.save(trials, true)
@@ -115,9 +158,13 @@ class TunerActivity : ComponentActivity() {
         ui {
             progress.value = 1f
             headline.value = "Done"
-            rows += ""
-            rows += "Selected:"
-            best.forEach { (m, b) -> rows += "  $m → ${b.label}" }
+            rows += Row("", 0)
+            rows += Row("Selected:", 0)
+            best.forEach { (m, b) ->
+                val ms = trials.firstOrNull { it.model == m && it.backend == b }?.avgMs ?: 0.0
+                val cpu = trials.firstOrNull { it.model == m && it.backend == Backend.CPU && it.ok }?.avgMs
+                rows += Row("  $m → ${b.short} ${"%.0f".format(ms)} ms" + (cpu?.let { " (${"%.1f".format(it / ms)}×)" } ?: ""), 1)
+            }
         }
         Thread.sleep(1500)
         ui { setResult(Activity.RESULT_OK); finish() }
@@ -126,29 +173,34 @@ class TunerActivity : ComponentActivity() {
     }
 
     private fun describe(t: Trial) = when {
-        t.status == "ok" -> "✓ ${t.model} · ${t.backend.label}: ${"%.0f".format(t.avgMs)} ms (first ${t.firstRunMs} ms)"
-        t.status == "mismatch" -> "✗ ${t.model} · ${t.backend.label}: wrong output (similarity ${"%.3f".format(t.similarity)})"
-        else -> "✗ ${t.model} · ${t.backend.label}: ${t.status}"
+        t.ok -> Row("✓ ${t.model} · ${t.backend.short}: ${"%.1f".format(t.avgMs)} ms (first ${t.firstRunMs} ms)${if (t.status == "ok-partial") " · partial" else ""}", 1)
+        t.status == "mismatch" -> Row("✗ ${t.model} · ${t.backend.short}: wrong output (${"%.4f".format(t.similarity)})", 2)
+        else -> Row("✗ ${t.model} · ${t.backend.short}: ${t.status}", 2)
     }
 
-    /** Returns (first run incl. compilation ms, average steady-state ms, first output). */
-    private fun measure(file: File, id: String, backend: Backend, threads: Int, rnd: Random): Triple<Long, Double, FloatArray> {
+    /** Returns (first run incl. compilation ms, average steady-state ms, all outputs of the first run). */
+    private fun measure(file: File, id: String, backend: Backend, threads: Int, sample: Map<String, Tensor>?, strict: Boolean): Triple<Long, Double, List<FloatArray>> {
         val t0 = System.nanoTime()
-        Backends.load(this, id, file, backend, threads).use { model ->
+        Backends.load(this, id, file, backend, threads, strict).use { model ->
             val inputs = model.inputNames.associateWith { name ->
-                val shape = (model.inputShape(name) ?: longArrayOf()).map { if (it > 0) it else defaultDim(id) }.toLongArray()
-                val n = shape.fold(1L) { a, b -> a * b }.toInt().coerceAtLeast(1)
-                val data = FloatArray(n) { rnd.nextFloat() }
-                if (name.contains("source") || name.contains("emb")) { val s = sqrt(data.sumOf { (it * it).toDouble() }).toFloat(); for (i in data.indices) data[i] /= s }
-                Tensor(data, shape)
+                sample?.get(name)?.takeIf { s -> model.inputShape(name)?.let { it.size == s.shape.size } != false } ?: randomInput(model.inputShape(name), name, id)
             }
-            val out = model.run(inputs).values.first().data
+            val out = model.run(inputs).values.map { it.data }
             val first = (System.nanoTime() - t0) / 1_000_000
-            val runs = if (file.length() > 100_000_000) 3 else 6
+            val runs = if (file.length() > 100_000_000) 3 else 8
             val s = System.nanoTime()
             repeat(runs) { model.run(inputs) }
             return Triple(first, (System.nanoTime() - s) / 1e6 / runs, out)
         }
+    }
+
+    private val rnd = Random(42)
+    private fun randomInput(shape: LongArray?, name: String, id: String): Tensor {
+        val s = (shape ?: longArrayOf()).map { if (it > 0) it else defaultDim(id) }.toLongArray()
+        val n = s.fold(1L) { a, b -> a * b }.toInt().coerceAtLeast(1)
+        val data = FloatArray(n) { rnd.nextFloat() }
+        if (name.contains("source") || name.contains("emb")) { val l = sqrt(data.sumOf { (it * it).toDouble() }).toFloat(); for (i in data.indices) data[i] /= l }
+        return Tensor(data, s)
     }
 
     private fun defaultDim(model: String): Long = when {
@@ -159,10 +211,20 @@ class TunerActivity : ComponentActivity() {
         else -> 1
     }
 
+    /** Worst cosine similarity over all outputs. */
+    private fun similarity(a: List<FloatArray>, b: List<FloatArray>): Double {
+        if (a.size != b.size) return 0.0
+        return a.indices.minOf { i -> cosine(a[i], b[i]) }
+    }
+
     private fun cosine(a: FloatArray, b: FloatArray): Double {
         if (a.size != b.size) return 0.0
         var d = 0.0; var na = 0.0; var nb = 0.0
-        for (i in a.indices) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i] }
+        for (i in a.indices) {
+            val x = a[i].toDouble(); val y = b[i].toDouble()
+            if (!x.isFinite() || !y.isFinite()) return 0.0
+            d += x * y; na += x * x; nb += y * y
+        }
         if (na == 0.0 && nb == 0.0) return 1.0
         return d / (sqrt(na * nb) + 1e-12)
     }

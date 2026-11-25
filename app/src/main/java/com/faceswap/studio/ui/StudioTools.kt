@@ -4,6 +4,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -39,8 +43,9 @@ import com.faceswap.studio.util.Bitmaps
 private enum class Tool(val label: String) { EDIT("Face editor"), AGE("Age"), BACKGROUND("Background"), UPSCALE("Upscale"), ENHANCE("Enhance") }
 
 /** FaceFusion processors on the current photo (result or target). Each apply pushes an undo step. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun StudioTools(vm: AppViewModel) {
+fun StudioTools(vm: AppViewModel, nav: Navigator) {
     val st by vm.photo.collectAsState()
     if (st.target == null) return
     val m = vm.models
@@ -50,19 +55,21 @@ fun StudioTools(vm: AppViewModel) {
         uri?.let { runCatching { Bitmaps.toRgb(Bitmaps.decode(ctx, it, 2048)) }.getOrNull()?.let { img -> vm.applyStudio(AppViewModel.StudioOp.Background(Processors.Background.Image(img))) } }
     }
 
-    Card(Modifier.fillMaxWidth().padding(top = 14.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Studio tools", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                if (st.history.isNotEmpty()) TextButton(onClick = vm::undoStudio) { Text("Undo") }
-                if (st.result != null) TextButton(onClick = vm::resultAsTarget) { Text("Use as target") }
-            }
+    @Composable fun Missing(what: String) = Column {
+        Text("Install $what to use this tool.", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = { nav.toSettings(SettingsPage.MODELS) }) { Text("Open models") }
+    }
+    SectionTitle("Studio tools", action = { if (st.history.isNotEmpty()) TextButton(onClick = vm::undoStudio) { Text("Undo") } })
+    Panel {
+        Column {
+            Text("Applied to the ${if (st.result != null) "current result" else "photo"} – each step can be undone.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 items(Tool.entries.size) { i -> val t = Tool.entries[i]; FilterChip(tool == t, { tool = t }, { Text(t.label) }) }
             }
             st.toolBusy?.let {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 10.dp)) {
-                    CircularProgressIndicator(Modifier.size(20.dp)); Text("  $it")
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 12.dp)) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Text("  $it")
                 }
                 return@Column
             }
@@ -99,17 +106,17 @@ fun StudioTools(vm: AppViewModel) {
                         Text("Current age ${current.toInt()}"); Slider(current, { current = it }, valueRange = 10f..90f)
                         Text("Target age ${target.toInt()}"); Slider(target, { target = it }, valueRange = 5f..95f)
                         Button(onClick = { vm.applyStudio(AppViewModel.StudioOp.Age(current, target)) }) { Text("Apply") }
-                        Note("Runs at 1024² per face – a few seconds on the NPU/GPU.")
+                        Note("Runs at 1024² per face – a few seconds on the NPU/GPU, longer on CPU.")
                     }
                 }
                 Tool.BACKGROUND -> {
                     if (!m.has(ModelIds.MODNET) && !m.has(ModelIds.U2NETP)) Missing("MODNet") else {
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
                             OutlinedButton(onClick = { vm.applyStudio(AppViewModel.StudioOp.Background(Processors.Background.Blur(0.7f))) }) { Text("Blur") }
                             OutlinedButton(onClick = { vm.applyStudio(AppViewModel.StudioOp.Background(Processors.Background.Transparent)) }) { Text("Remove") }
                             OutlinedButton(onClick = { pickBg.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) { Text("Replace") }
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
                             listOf("White" to 0xFFFFFF, "Black" to 0x000000, "Green" to 0x00B140, "Studio grey" to 0x8A8D93).forEach { (n, c) ->
                                 OutlinedButton(onClick = { vm.applyStudio(AppViewModel.StudioOp.Background(Processors.Background.Color(c))) }) { Text(n) }
                             }
@@ -119,15 +126,15 @@ fun StudioTools(vm: AppViewModel) {
                 }
                 Tool.UPSCALE -> {
                     val options = listOf(ModelIds.SPAN_X4 to "SPAN ×4 (fast)", ModelIds.ESRGAN_X2 to "Real-ESRGAN ×2", ModelIds.ESRGAN_X4 to "Real-ESRGAN ×4").filter { m.has(it.first) }
-                    if (options.isEmpty()) Missing("an upscaler") else Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (options.isEmpty()) Missing("an upscaler") else FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         options.forEach { (id, l) -> OutlinedButton(onClick = { vm.applyStudio(AppViewModel.StudioOp.Upscale(id)) }) { Text(l) } }
                     }
                     Note("Tiled – any resolution. Large photos take a while.")
                 }
                 Tool.ENHANCE -> {
                     val options = ModelIds.ENHANCERS.filter { m.has(it) }
-                    if (options.isEmpty()) Missing("a face enhancer") else Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        options.forEach { id -> OutlinedButton(onClick = { vm.applyStudio(AppViewModel.StudioOp.Enhance(id)) }) { Text(id.substringBefore("_bfr").replace("_", " ")) } }
+                    if (options.isEmpty()) Missing("a face enhancer") else FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        options.forEach { id -> OutlinedButton(onClick = { vm.applyStudio(AppViewModel.StudioOp.Enhance(id)) }) { Text(vm.modelTitle(id)) } }
                     }
                 }
             }
@@ -143,5 +150,3 @@ private fun Slider1(label: String, v: Float, on: (Float) -> Unit) {
     }
 }
 
-@Composable private fun Missing(what: String) = Text("Install $what to use this tool.", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
-@Composable private fun Note(t: String) = Text(t, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))

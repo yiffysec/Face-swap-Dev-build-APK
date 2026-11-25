@@ -115,6 +115,21 @@ class ModelManager(private val context: Context) {
     fun has(id: String) = file(id).exists()
     /** Optional TFLite twin of a model (for the LiteRT GPU backend), produced by CI conversion. */
     fun tflite(id: String) = File(dir, "$id.tflite").takeIf { it.exists() }
+    /** Optional calibrated w8a16 QDQ twin (Snapdragon NPU int8), produced by CI quantization. */
+    fun int8(id: String) = File(dir, "$id.qdq.onnx").takeIf { it.exists() }
+
+    /** Accelerator twins installed for a model, e.g. "GPU", "NPU int8". */
+    fun twins(id: String): List<String> = buildList {
+        if (com.faceswap.studio.engine.LiteRtModel.available(dir, id)) add("GPU")
+        if (int8(id) != null) add("NPU int8")
+    }
+
+    /** Bytes used by a model and all its twins. */
+    fun bytesOnDisk(id: String): Long = companions(id).sumOf { it.length() }
+
+    private fun companions(id: String) = listOf("$id.onnx", "$id.tflite", "$id.tflite.json", "$id.qdq.onnx", "$id.sample.bin").map { File(dir, it) }.filter { it.exists() }
+
+    val totalBytes: Long get() = dir.listFiles()?.sumOf { it.length() } ?: 0L
 
     val requiredReady get() = ModelCatalog.all.filter { it.required }.all { file(it).exists() }
     val missingRequiredBytes get() = ModelCatalog.all.filter { it.required && !file(it).exists() }.sumOf { it.sizeBytes }
@@ -122,9 +137,10 @@ class ModelManager(private val context: Context) {
     private fun set(id: String, s: ModelState) = _states.update { it + (id to s) }
 
     fun delete(spec: ModelSpec) {
-        file(spec).delete(); File(dir, spec.fileName + ".part").delete()
+        companions(spec.id).forEach { it.delete() }
+        File(dir, spec.fileName + ".part").delete()
         if (spec.id.startsWith("inswapper")) emapCache.delete()
-        File(dir, "${spec.id}.tflite").delete(); File(dir, "${spec.id}.tflite.json").delete()
+        com.faceswap.studio.engine.Backends.clearCompiled(context, spec.id)
         set(spec.id, ModelState.Missing)
     }
 
@@ -187,25 +203,33 @@ class ModelManager(private val context: Context) {
     /** True if this APK ships with models in assets/models (offline builds). */
     val hasBundledModels: Boolean by lazy { (context.assets.list("models") ?: emptyArray()).any { it.endsWith(".onnx") } }
 
-    private fun isModelFile(name: String) = name.endsWith(".onnx") || name.endsWith(".tflite") || name.endsWith(".tflite.json")
-    private fun idOf(name: String) = name.removeSuffix(".json").removeSuffix(".tflite").removeSuffix(".onnx")
+    private fun isModelFile(name: String) = name.endsWith(".onnx") || name.endsWith(".tflite") || name.endsWith(".tflite.json") || name.endsWith(".sample.bin")
+    /** Catalog id of any model file or twin: x.onnx, x.qdq.onnx, x.tflite, x.tflite.json, x.sample.bin → x */
+    private fun idOf(name: String) = name.removeSuffix(".json").removeSuffix(".tflite").removeSuffix(".onnx").removeSuffix(".qdq")
+        .removeSuffix(".bin").removeSuffix(".sample")
+    /** The main model file (shown as Installing / Ready); twins install silently. */
+    private fun isPrimary(name: String) = name.endsWith(".onnx") && !name.endsWith(".qdq.onnx")
 
     /** Copies models bundled in the APK into app storage (first launch / after update). Idempotent. */
     suspend fun installBundled() = withContext(Dispatchers.IO) {
         val bundled = context.assets.list("models")?.filter(::isModelFile) ?: return@withContext
-        // TFLite twins + mappings first (silent), then ONNX models (shown as Installing)
-        for (name in bundled.sortedBy { if (it.endsWith(".onnx")) 1 else 0 }) {
+        // Twins (TFLite + mapping, INT8, sample inputs) first and silently, then the main models (shown as Installing).
+        // A twin is re-copied when the APK ships a different size (new CI conversion) – the NPU cache is then rebuilt.
+        for (name in bundled.sortedBy { if (isPrimary(it)) 1 else 0 }) {
             val target = File(dir, name)
-            if (target.exists()) continue
+            val assetSize = runCatching { context.assets.openFd("models/$name").use { it.length } }.getOrDefault(-1L)
+            if (target.exists() && (isPrimary(name) || assetSize < 0 || target.length() == assetSize)) continue
             val spec = ModelCatalog.byId(idOf(name))
-            if (name.endsWith(".onnx") && spec != null) set(spec.id, ModelState.Installing)
+            if (isPrimary(name) && spec != null) set(spec.id, ModelState.Installing)
             try {
                 val part = File(dir, "$name.part")
                 context.assets.open("models/$name").use { input -> part.outputStream().use { input.copyTo(it, 1 shl 20) } }
+                target.delete()
                 check(part.renameTo(target))
-                if (name.endsWith(".onnx") && spec != null) set(spec.id, ModelState.Ready)
+                if (!isPrimary(name)) com.faceswap.studio.engine.Backends.clearCompiled(context, idOf(name))
+                if (isPrimary(name) && spec != null) set(spec.id, ModelState.Ready)
             } catch (t: Throwable) {
-                if (spec != null && name.endsWith(".onnx")) set(spec.id, ModelState.Failed("Install failed: ${t.message}"))
+                if (spec != null && isPrimary(name)) set(spec.id, ModelState.Failed("Install failed: ${t.message}"))
             }
         }
     }
@@ -219,13 +243,14 @@ class ModelManager(private val context: Context) {
         fun store(name: String, write: (File) -> Unit) {
             val base = if (name == "arcface.onnx") "mobilefaceswap_arcface.onnx" else name
             val spec = ModelCatalog.byId(idOf(base)) ?: return
-            if (base.endsWith(".onnx")) set(spec.id, ModelState.Installing)
+            if (isPrimary(base)) set(spec.id, ModelState.Installing)
             try {
                 val part = File(dir, "$base.part")
                 write(part)
                 File(dir, base).delete()
                 check(part.renameTo(File(dir, base)))
-                if (spec.id.startsWith("inswapper") && base.endsWith(".onnx")) emapCache.delete()
+                if (spec.id.startsWith("inswapper") && isPrimary(base)) emapCache.delete()
+                com.faceswap.studio.engine.Backends.clearCompiled(context, spec.id)
                 done += base
             } catch (t: Throwable) {
                 set(spec.id, ModelState.Failed("Import failed: ${t.message}"))

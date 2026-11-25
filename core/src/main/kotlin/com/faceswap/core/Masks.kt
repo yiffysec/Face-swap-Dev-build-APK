@@ -12,15 +12,17 @@ object MaskOps {
     fun resize(m: FloatArray, sw: Int, sh: Int, dw: Int, dh: Int): FloatArray {
         val out = FloatArray(dw * dh)
         val sx = sw.toFloat() / dw; val sy = sh.toFloat() / dh
-        for (y in 0 until dh) {
-            val fy = ((y + 0.5f) * sy - 0.5f).coerceIn(0f, (sh - 1).toFloat())
-            val y0 = floor(fy).toInt(); val y1 = min(y0 + 1, sh - 1); val ay = fy - y0
-            for (x in 0 until dw) {
-                val fx = ((x + 0.5f) * sx - 0.5f).coerceIn(0f, (sw - 1).toFloat())
-                val x0 = floor(fx).toInt(); val x1 = min(x0 + 1, sw - 1); val ax = fx - x0
-                val top = m[y0 * sw + x0] * (1 - ax) + m[y0 * sw + x1] * ax
-                val bot = m[y1 * sw + x0] * (1 - ax) + m[y1 * sw + x1] * ax
-                out[y * dw + x] = top * (1 - ay) + bot * ay
+        Par.rows(dh, dw) { from, to ->
+            for (y in from until to) {
+                val fy = ((y + 0.5f) * sy - 0.5f).coerceIn(0f, (sh - 1).toFloat())
+                val y0 = floor(fy).toInt(); val y1 = min(y0 + 1, sh - 1); val ay = fy - y0
+                for (x in 0 until dw) {
+                    val fx = ((x + 0.5f) * sx - 0.5f).coerceIn(0f, (sw - 1).toFloat())
+                    val x0 = floor(fx).toInt(); val x1 = min(x0 + 1, sw - 1); val ax = fx - x0
+                    val top = m[y0 * sw + x0] * (1 - ax) + m[y0 * sw + x1] * ax
+                    val bot = m[y1 * sw + x0] * (1 - ax) + m[y1 * sw + x1] * ax
+                    out[y * dw + x] = top * (1 - ay) + bot * ay
+                }
             }
         }
         return out
@@ -33,16 +35,29 @@ object MaskOps {
         val k = FloatArray(2 * r + 1) { val d = (it - r).toFloat(); exp(-d * d / (2 * sigma * sigma)) }
         val ks = k.sum(); for (i in k.indices) k[i] /= ks
         val tmp = FloatArray(w * h)
-        for (y in 0 until h) for (x in 0 until w) {
-            var s = 0f
-            for (i in -r..r) s += m[y * w + (x + i).coerceIn(0, w - 1)] * k[i + r]
-            tmp[y * w + x] = s
+        val taps = 2 * r + 1
+        Par.rows(h, w * taps) { from, to ->
+            for (y in from until to) {
+                val row = y * w
+                for (x in 0 until w) {
+                    var s = 0f
+                    if (x >= r && x < w - r) { val base = row + x - r; for (i in 0 until taps) s += m[base + i] * k[i] }
+                    else for (i in -r..r) s += m[row + (x + i).coerceIn(0, w - 1)] * k[i + r]
+                    tmp[row + x] = s
+                }
+            }
         }
         val out = FloatArray(w * h)
-        for (y in 0 until h) for (x in 0 until w) {
-            var s = 0f
-            for (i in -r..r) s += tmp[(y + i).coerceIn(0, h - 1) * w + x] * k[i + r]
-            out[y * w + x] = s
+        Par.rows(h, w * taps) { from, to ->
+            for (y in from until to) {
+                val interior = y >= r && y < h - r
+                for (x in 0 until w) {
+                    var s = 0f
+                    if (interior) { var idx = (y - r) * w + x; for (i in 0 until taps) { s += tmp[idx] * k[i]; idx += w } }
+                    else for (i in -r..r) s += tmp[(y + i).coerceIn(0, h - 1) * w + x] * k[i + r]
+                    out[y * w + x] = s
+                }
+            }
         }
         return out
     }

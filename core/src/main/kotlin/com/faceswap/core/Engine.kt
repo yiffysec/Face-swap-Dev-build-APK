@@ -94,6 +94,11 @@ data class SwapConfig(
     val expressionAreas: Set<MaskOps.Area> = setOf(MaskOps.Area.UPPER_FACE, MaskOps.Area.LOWER_FACE),
     /** Draw boxes / landmarks / masks over the result (developer overlay). */
     val debugOverlay: Boolean = false,
+    /**
+     * Skip the face enhancer for a face whose swap is already at least as sharp as the original target face
+     * (typical for small faces in video). The enhancer can't add real detail there, it only costs time.
+     */
+    val adaptiveEnhance: Boolean = false,
 )
 
 data class SwapResult(
@@ -267,8 +272,11 @@ class FaceSwapEngine(
         val decision: PolicyDecision,
         val faces: List<Face>,
         val assignments: List<Pair<Face, SourceFace>>,
-        internal val timings: MutableMap<String, Long>,
-    )
+        internal val timingsMap: MutableMap<String, Long>,
+    ) {
+        /** Per-stage times in ms accumulated by analyze + render (detect, swap, enhance, …). */
+        val timings: Map<String, Long> get() = synchronized(timingsMap) { LinkedHashMap(timingsMap) }
+    }
 
     /**
      * Stage 1 (must run in frame order for video because of the tracker): content policy, detection, tracking,
@@ -286,22 +294,27 @@ class FaceSwapEngine(
         return FramePlan(decision, faces, plan, timings)
     }
 
-    /** Stage 2 (thread-safe, can run on several frames in parallel): swap, expression restore, enhance, overlay. */
-    fun render(target: RgbImage, fp: FramePlan, config: SwapConfig): RgbImage {
+    /**
+     * Stage 2 (thread-safe, can run on several frames in parallel): swap, expression restore, enhance, overlay.
+     * [draft] = fast preview of the same plan: native swapper resolution, no expression restore, no enhancer.
+     */
+    fun render(target: RgbImage, fp: FramePlan, config: SwapConfig, draft: Boolean = false): RgbImage {
         if (!fp.decision.allowed || fp.assignments.isEmpty()) return if (config.debugOverlay) target.copy().also { Debugger.draw(it, fp.faces, emptySet()) } else target
-        val timings = fp.timings
+        val timings: MutableMap<String, Long> = if (draft) LinkedHashMap() else fp.timingsMap
         fun <T> timed(k: String, b: () -> T): T { val s = System.currentTimeMillis(); return b().also { synchronized(timings) { timings[k] = (timings[k] ?: 0) + System.currentTimeMillis() - s } } }
+        val cfg = if (draft) config.copy(pixelBoost = 0, maskTypes = config.maskTypes - MaskType.REGION) else config
         val out = target.copy()
-        val swapper = swapper(config.swapperId)
-        for ((face, src) in fp.assignments) timed("swap") { swapFace(out, target, face, latentFor(src, swapper), swapper, config) }
-        if (config.expressionRestore > 0f && processors.hasLivePortrait) for ((face, _) in fp.assignments) timed("expression") {
-            processors.restoreExpression(target, out, face, config.expressionRestore, config.expressionAreas, config.maskBlur)
+        val swapper = swapper(cfg.swapperId)
+        for ((face, src) in fp.assignments) timed("swap") { swapFace(out, target, face, latentFor(src, swapper), swapper, cfg) }
+        if (draft) return out
+        if (cfg.expressionRestore > 0f && processors.hasLivePortrait) for ((face, _) in fp.assignments) timed("expression") {
+            processors.restoreExpression(target, out, face, cfg.expressionRestore, cfg.expressionAreas, cfg.maskBlur)
         }
-        if (config.enhancerId != null && has(config.enhancerId)) {
-            val enh = restorer(config.enhancerId)
-            for ((face, _) in fp.assignments) timed("enhance") { enhanceFace(out, face, enh, config) }
+        if (cfg.enhancerId != null && has(cfg.enhancerId)) {
+            val enh = restorer(cfg.enhancerId)
+            for ((face, _) in fp.assignments) timed("enhance") { enhanceFace(out, target, face, enh, cfg) }
         }
-        if (config.debugOverlay) Debugger.draw(out, fp.faces, fp.assignments.map { it.first }.toSet())
+        if (cfg.debugOverlay) Debugger.draw(out, fp.faces, fp.assignments.map { it.first }.toSet())
         return out
     }
 
@@ -329,8 +342,9 @@ class FaceSwapEngine(
             masks += MaskOps.gaussian(mm, size, size, size / 128f)
         }
         if (MaskType.REGION in types) parser()?.let { p ->
-            // regions of the ORIGINAL crop: hair / hands / objects in front of the face stay untouched
-            masks += MaskOps.minimum(listOf(p.regionMask(crop, config.maskRegions), p.regionMask(swapped, config.maskRegions)))
+            // regions of the ORIGINAL crop (like FaceFusion): hair / hands / objects in front of the face stay untouched.
+            // One parser pass per face – parsing the swapped crop as well doubled the cost for no visible gain.
+            masks += p.regionMask(crop, config.maskRegions)
         }
         if (MaskType.AREA in types) face.landmarks68?.let { l68 -> masks += MaskOps.areaMask(Geometry.transformPoints(l68, m), config.maskAreas, size, size) }
         return MaskOps.minimum(masks)
@@ -338,7 +352,7 @@ class FaceSwapEngine(
 
     private fun swapFace(out: RgbImage, original: RgbImage, face: Face, latent: FloatArray, swapper: FaceSwapModel, config: SwapConfig) {
         val ms = swapper.size
-        val k = (config.pixelBoost / ms).coerceIn(1, 4)
+        val k = (config.pixelBoost / ms).coerceIn(1, 4) // pixelBoost 0 (draft) → native
         val size = ms * k
         val m = Geometry.estimateSimilarity(face.landmarks, swapper.template, size.toFloat())
         val crop = ImageOps.warpAffine(original, m, size, size)
@@ -367,9 +381,16 @@ class FaceSwapEngine(
         ImageOps.pasteBack(out, swapped, mask, m, config.swapOpacity)
     }
 
-    private fun enhanceFace(out: RgbImage, face: Face, enh: FaceRestorer, config: SwapConfig) {
+    /** Faces skipped by [SwapConfig.adaptiveEnhance] (for stats / tests). */
+    @Volatile var enhanceSkipped = 0; private set
+
+    private fun enhanceFace(out: RgbImage, original: RgbImage, face: Face, enh: FaceRestorer, config: SwapConfig) {
         val m = Geometry.estimateSimilarity(face.landmarks, enh.template, enh.size.toFloat())
         val crop = ImageOps.warpAffine(out, m, enh.size, enh.size)
+        if (config.adaptiveEnhance) {
+            val before = ImageOps.sharpness(ImageOps.warpAffine(original, m, enh.size, enh.size))
+            if (ImageOps.sharpness(crop) >= before * 0.9) { enhanceSkipped++; return }
+        }
         val restored = enh.enhance(crop, config.codeformerFidelity)
         val mixed = ImageOps.mix(crop, restored, config.enhanceBlend)
         val box = ImageOps.boxMask(enh.size, enh.size, config.maskBlur.coerceAtLeast(0.2f), floatArrayOf(0.02f, 0.02f, 0.02f, 0.02f))

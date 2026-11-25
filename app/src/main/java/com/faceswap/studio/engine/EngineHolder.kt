@@ -53,27 +53,40 @@ class EngineHolder(private val context: Context, private val models: ModelManage
     }
 
     private fun load(id: String, file: File, settings: AppSettings, tuned: Map<String, Backend>): InferenceModel {
-        val hasTflite = LiteRtModel.available(file.parentFile!!, id)
+        val dir = file.parentFile!!
         val backend = when (settings.accelerator) {
-            Accelerator.AUTO -> tuned[id] ?: Backend.CPU
+            Accelerator.AUTO -> tuned[id] ?: defaultBackend(id)
             Accelerator.CPU -> Backend.CPU
             Accelerator.XNNPACK -> Backend.XNNPACK
-            Accelerator.NNAPI -> Backend.NNAPI_FP16
+            Accelerator.NNAPI -> if (CpuInfo.isSnapdragon) Backend.CPU else Backend.NNAPI_FP16 // no NNAPI driver on Snapdragon
             Accelerator.QNN -> if (CpuInfo.isSnapdragon) Backend.QNN_HTP else Backend.CPU
-            Accelerator.GPU -> if (hasTflite) Backend.LITERT_GPU else Backend.CPU
+            Accelerator.GPU -> if (LiteRtModel.available(dir, id)) Backend.LITERT_GPU_ACC32 else Backend.CPU
         }
-        Diagnostics.crumb("model load start: $id ($backend, ${settings.threads} threads)")
-        return try {
-            Backends.load(context, id, file, backend, settings.threads).also {
-                loadedBackends[id] = it.backend
-                Diagnostics.crumb("model load ok: $id on ${it.backend}")
+        // fallback chain: tuned/forced → (INT8 → fp16 NPU) → CPU
+        val chain = buildList {
+            add(backend)
+            if (backend == Backend.QNN_HTP_INT8) add(Backend.QNN_HTP)
+            if (backend != Backend.CPU) add(Backend.CPU)
+        }
+        var last: Throwable? = null
+        for ((i, b) in chain.withIndex()) {
+            Diagnostics.crumb("model load start: $id ($b, ${settings.threads} threads)")
+            try {
+                return Backends.load(context, id, file, b, settings.threads).also {
+                    loadedBackends[id] = it.backend + if (i > 0) " (fallback)" else ""
+                    Diagnostics.crumb("model load ok: $id on ${it.backend}")
+                }
+            } catch (t: Throwable) {
+                last = t
+                Log.w("EngineHolder", "$b failed for $id", t)
+                Diagnostics.crumb("model load failed with $b (${t.message?.lines()?.firstOrNull()})")
             }
-        } catch (t: Throwable) {
-            Log.w("EngineHolder", "$backend failed for $id, falling back to CPU", t)
-            Diagnostics.crumb("model load failed with $backend (${t.message}), retrying on CPU: $id")
-            Backends.load(context, id, file, Backend.CPU, settings.threads).also { loadedBackends[id] = it.backend + " (fallback)" }
         }
+        throw last ?: IllegalStateException("could not load $id")
     }
+
+    /** Before tuning: CPU is the only backend that never crashes natively (XNNPACK did on some builds). */
+    private fun defaultBackend(@Suppress("UNUSED_PARAMETER") id: String) = Backend.CPU
 
     /** Frees model memory but keeps the engine (next use reloads lazily). */
     suspend fun trim() = mutex.withLock { engine?.unloadAll(); loadedBackends.clear() }

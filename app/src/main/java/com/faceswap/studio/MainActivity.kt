@@ -40,6 +40,6 @@ class MainActivity : ComponentActivity() {
         @Suppress("DEPRECATION")
         val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) ?: return
         val type = intent.type ?: contentResolver.getType(uri) ?: return
-        if (type.startsWith("image/")) vm.setPhotoTarget(uri) else if (type.startsWith("video/")) vm.setVideoTarget(uri)
+        if (type.startsWith("image/")) vm.openShared(uri, video = false) else if (type.startsWith("video/")) vm.openShared(uri, video = true)
     }
 }

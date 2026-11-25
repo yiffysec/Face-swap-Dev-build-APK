@@ -15,12 +15,17 @@ import java.io.File
  * Uses the `<id>.tflite.json` sidecar written by tools/convert_tflite.py to map ONNX tensor names/layouts onto the
  * TFLite signature, so the engine code is identical across runtimes.
  */
-class LiteRtModel(context: Context, tflite: File, accelerator: Accelerator = Accelerator.GPU) : InferenceModel {
+class LiteRtModel(
+    context: Context,
+    tflite: File,
+    precision: CompiledModel.GpuOptions.Precision = CompiledModel.GpuOptions.Precision.FP16,
+    accelerator: Accelerator = Accelerator.GPU,
+) : InferenceModel {
     /** [sig] = tensor name in the TFLite signature (LiteRT runs by signature, not by interpreter order). */
     private data class Io(val onnx: String, val sig: String, val nhwc: Boolean, val shape: LongArray)
 
     override val name = tflite.nameWithoutExtension
-    override val backend = "LiteRT/${accelerator.name}"
+    override val backend = "LiteRT/${accelerator.name} ${precision.name.lowercase()}"
 
     private val inputs: List<Io>
     private val outputs: List<Io>
@@ -43,9 +48,11 @@ class LiteRtModel(context: Context, tflite: File, accelerator: Accelerator = Acc
         inputs = parse("inputs")
         outputs = parse("outputs")
         val options = CompiledModel.Options(accelerator).apply {
+            // infiniteFloatCapping: fp16 overflow (Mali InstanceNorm / large sums) is capped instead of becoming Inf/NaN.
+            // The serialized program cache is keyed per precision so variants never share a compiled program.
             if (accelerator == Accelerator.GPU) gpuOptions = CompiledModel.GpuOptions(
-                null, null, null, CompiledModel.GpuOptions.Precision.FP16, null, null,
-                File(context.cacheDir, "litert_gpu").apply { mkdirs() }.absolutePath, name, true, null, null, null, null, null, null,
+                null, precision != CompiledModel.GpuOptions.Precision.FP32, null, precision, null, null,
+                File(context.cacheDir, "litert_gpu").apply { mkdirs() }.absolutePath, "$name-${precision.name}", true, null, null, null, null, null, null,
             )
         }
         model = CompiledModel.create(tflite.absolutePath, options, env(context))

@@ -22,8 +22,8 @@ android {
         applicationId = "com.faceswap.studio"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
@@ -45,7 +45,7 @@ android {
         }
     }
     // universal: ONNX Runtime (CPU/XNNPACK/NNAPI) + LiteRT GPU – Pixel 8 Pro and everything else.
-    // snapdragon: ONNX Runtime with the QNN execution provider (Hexagon NPU / Adreno) + LiteRT GPU – Galaxy S24 Ultra.
+    // snapdragon: + Qualcomm's QNN plugin EP (Hexagon NPU, int8 QDQ models) – Galaxy S24 Ultra.
     flavorDimensions += "soc"
     productFlavors {
         create("universal") { dimension = "soc"; isDefault = true }
@@ -61,10 +61,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     androidResources {
-        // keep .onnx uncompressed so first-launch install is a fast straight copy
-        noCompress += "onnx"
+        // models stay uncompressed: first-launch install is a straight copy and twins can be size-checked (openFd)
+        noCompress += listOf("onnx", "tflite", "bin", "json")
     }
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("bundled-models"))
+    // calibrated int8 (w8a16 QDQ) twins only help the Hexagon NPU → Snapdragon APK only
+    sourceSets["snapdragon"].assets.srcDir(layout.buildDirectory.dir("bundled-models-npu"))
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
         // QNN's HTP skeleton libraries are loaded by the DSP from a real file path → extract native libs.
@@ -76,8 +78,11 @@ kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarg
 
 dependencies {
     implementation(project(":core"))
-    "universalImplementation"("com.microsoft.onnxruntime:onnxruntime-android:1.32.0")
-    "snapdragonImplementation"("com.microsoft.onnxruntime:onnxruntime-android-qnn:1.29.0") // pulls com.qualcomm.qti:qnn-runtime
+    // One ONNX Runtime for both flavors; Snapdragon adds Qualcomm's QNN plugin EP (v2.8: multi-core NPU, fp16 overflow
+    // clamp, faster context loading) + the matching QNN SDK runtime libraries (QAIRT 2.52).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.32.0")
+    "snapdragonImplementation"("com.qualcomm.qti:onnxruntime-android-qnn:2.8.0")
+    "snapdragonImplementation"("com.qualcomm.qti:qnn-runtime:2.52.0")
 
     implementation("com.google.ai.edge.litert:litert:2.4.0")
     implementation("com.google.ai.edge.litert:litert-gpu:2.4.0")
@@ -172,15 +177,21 @@ val fetchModels by tasks.registering {
     outputs.dir(outDir)
     // always re-stage from the cache: tools/prepare_models.py / convert_tflite.py may have rewritten cached models
     outputs.upToDateWhen { false }
+    val npuDir = layout.buildDirectory.dir("bundled-models-npu/models")
+    outputs.dir(npuDir)
     doLast {
         val out = outDir.get().asFile
+        val npu = npuDir.get().asFile
         out.deleteRecursively(); out.mkdirs()
+        npu.deleteRecursively(); npu.mkdirs()
         if (!bundleModels) return@doLast
         modelsCache.mkdirs()
         for ((id, url) in bundled) {
             download(id, url, modelsCache)
             File(modelsCache, "$id.onnx").copyTo(File(out, "$id.onnx"), overwrite = true)
-            for (ext in listOf("tflite", "tflite.json")) File(modelsCache, "$id.$ext").takeIf { it.exists() }?.copyTo(File(out, "$id.$ext"), overwrite = true)
+            // GPU twins + real sample inputs (tuner) for every flavor
+            for (ext in listOf("tflite", "tflite.json", "sample.bin")) File(modelsCache, "$id.$ext").takeIf { it.exists() }?.copyTo(File(out, "$id.$ext"), overwrite = true)
+            File(modelsCache, "$id.qdq.onnx").takeIf { it.exists() }?.copyTo(File(npu, "$id.qdq.onnx"), overwrite = true)
         }
     }
 }

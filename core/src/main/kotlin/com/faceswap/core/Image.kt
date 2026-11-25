@@ -56,14 +56,17 @@ object ImageOps {
         val sp = src.pixels
         val sw = src.width
         val sh = src.height
-        for (y in 0 until h) {
-            var sx = inv.a * 0f + inv.b * y + inv.c
-            var sy = inv.d * 0f + inv.e * y + inv.f
-            val row = y * w
-            for (x in 0 until w) {
-                out.pixels[row + x] = sampleBilinear(sp, sw, sh, sx, sy)
-                sx += inv.a
-                sy += inv.d
+        val op = out.pixels
+        Par.rows(h, w) { from, to ->
+            for (y in from until to) {
+                var sx = inv.b * y + inv.c
+                var sy = inv.e * y + inv.f
+                val row = y * w
+                for (x in 0 until w) {
+                    op[row + x] = sampleBilinear(sp, sw, sh, sx, sy)
+                    sx += inv.a
+                    sy += inv.d
+                }
             }
         }
         return out
@@ -82,16 +85,12 @@ object ImageOps {
         val p01 = p[y0 * w + x1]
         val p10 = p[y1 * w + x0]
         val p11 = p[y1 * w + x1]
-        fun ch(s: Int): Int {
-            val c00 = (p00 shr s) and 0xFF
-            val c01 = (p01 shr s) and 0xFF
-            val c10 = (p10 shr s) and 0xFF
-            val c11 = (p11 shr s) and 0xFF
-            val top = c00 + (c01 - c00) * ax
-            val bot = c10 + (c11 - c10) * ax
-            return (top + (bot - top) * ay + 0.5f).toInt().coerceIn(0, 255)
-        }
-        return (0xFF shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
+        if (p00 == p01 && p00 == p10 && p00 == p11) return p00 or (0xFF shl 24) // flat area / exact pixel hit
+        val w00 = (1 - ax) * (1 - ay); val w01 = ax * (1 - ay); val w10 = (1 - ax) * ay; val w11 = ax * ay
+        val r = (((p00 shr 16) and 0xFF) * w00 + ((p01 shr 16) and 0xFF) * w01 + ((p10 shr 16) and 0xFF) * w10 + ((p11 shr 16) and 0xFF) * w11 + 0.5f).toInt()
+        val g = (((p00 shr 8) and 0xFF) * w00 + ((p01 shr 8) and 0xFF) * w01 + ((p10 shr 8) and 0xFF) * w10 + ((p11 shr 8) and 0xFF) * w11 + 0.5f).toInt()
+        val b = ((p00 and 0xFF) * w00 + (p01 and 0xFF) * w01 + (p10 and 0xFF) * w10 + (p11 and 0xFF) * w11 + 0.5f).toInt()
+        return (0xFF shl 24) or (r.coerceIn(0, 255) shl 16) or (g.coerceIn(0, 255) shl 8) or b.coerceIn(0, 255)
     }
 
     fun resize(src: RgbImage, w: Int, h: Int): RgbImage =
@@ -102,15 +101,15 @@ object ImageOps {
         val n = img.width * img.height
         val out = FloatArray(3 * n)
         val p = img.pixels
-        for (i in 0 until n) {
-            val v = p[i]
-            val r = ((v shr 16) and 0xFF) * scale
-            val g = ((v shr 8) and 0xFF) * scale
-            val b = (v and 0xFF) * scale
-            if (bgr) {
-                out[i] = (b - mean) / std; out[n + i] = (g - mean) / std; out[2 * n + i] = (r - mean) / std
-            } else {
-                out[i] = (r - mean) / std; out[n + i] = (g - mean) / std; out[2 * n + i] = (b - mean) / std
+        // v' = (v*scale - mean)/std = v*k + o
+        val k = scale / std; val o = -mean / std
+        val c0 = if (bgr) 0 else 16; val c2 = if (bgr) 16 else 0
+        Par.rows(img.height, img.width) { from, to ->
+            for (i in from * img.width until to * img.width) {
+                val v = p[i]
+                out[i] = ((v shr c0) and 0xFF) * k + o
+                out[n + i] = ((v shr 8) and 0xFF) * k + o
+                out[2 * n + i] = ((v shr c2) and 0xFF) * k + o
             }
         }
         return out
@@ -120,11 +119,15 @@ object ImageOps {
     fun fromChw(data: FloatArray, w: Int, h: Int, mean: Float, std: Float, scale: Float = 1f): RgbImage {
         val n = w * h
         val out = RgbImage(w, h)
-        for (i in 0 until n) {
-            val r = ((data[i] * std + mean) / scale).roundToInt().coerceIn(0, 255)
-            val g = ((data[n + i] * std + mean) / scale).roundToInt().coerceIn(0, 255)
-            val b = ((data[2 * n + i] * std + mean) / scale).roundToInt().coerceIn(0, 255)
-            out.pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        val k = std / scale; val o = mean / scale + 0.5f
+        val op = out.pixels
+        Par.rows(h, w) { from, to ->
+            for (i in from * w until to * w) {
+                val r = (data[i] * k + o).toInt().coerceIn(0, 255)
+                val g = (data[n + i] * k + o).toInt().coerceIn(0, 255)
+                val b = (data[2 * n + i] * k + o).toInt().coerceIn(0, 255)
+                op[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
         }
         return out
     }
@@ -188,16 +191,18 @@ object ImageOps {
         if (x0 > x1 || y0 > y1) return
         val tp = target.pixels
         val tw = target.width
-        for (y in y0..y1) {
-            for (x in x0..x1) {
-                val cx = m.mapX(x.toFloat(), y.toFloat())
-                val cy = m.mapY(x.toFloat(), y.toFloat())
-                if (cx < 0f || cy < 0f || cx > cw - 1 || cy > ch - 1) continue
-                val alpha = sampleMask(mask, cw, ch, cx, cy) * opacity
-                if (alpha <= 0.002f) continue
-                val src = sampleBilinear(crop.pixels, cw, ch, cx, cy)
-                val idx = y * tw + x
-                tp[idx] = blend(tp[idx], src, alpha)
+        Par.rows(y1 - y0 + 1, x1 - x0 + 1) { from, to ->
+            for (y in y0 + from until y0 + to) {
+                for (x in x0..x1) {
+                    val cx = m.mapX(x.toFloat(), y.toFloat())
+                    val cy = m.mapY(x.toFloat(), y.toFloat())
+                    if (cx < 0f || cy < 0f || cx > cw - 1 || cy > ch - 1) continue
+                    val alpha = sampleMask(mask, cw, ch, cx, cy) * opacity
+                    if (alpha <= 0.002f) continue
+                    val src = sampleBilinear(crop.pixels, cw, ch, cx, cy)
+                    val idx = y * tw + x
+                    tp[idx] = blend(tp[idx], src, alpha)
+                }
             }
         }
     }
@@ -226,8 +231,27 @@ object ImageOps {
     /** Blends two same-size images: out = a*(1-t) + b*t. */
     fun mix(a: RgbImage, b: RgbImage, t: Float): RgbImage {
         val out = RgbImage(a.width, a.height)
-        for (i in a.pixels.indices) out.pixels[i] = blend(a.pixels[i], b.pixels[i], t)
+        Par.rows(a.height, a.width) { from, to -> for (i in from * a.width until to * a.width) out.pixels[i] = blend(a.pixels[i], b.pixels[i], t) }
         return out
+    }
+
+    /**
+     * Sharpness = variance of the Laplacian of luma (on a ≤[maxSide] downscale). Used to skip the face enhancer when
+     * the swapped face is already as sharp as the original (enhancing then adds nothing but time).
+     */
+    fun sharpness(img: RgbImage, maxSide: Int = 160): Double {
+        val s = if (maxOf(img.width, img.height) > maxSide) resize(img, maxSide * img.width / maxOf(img.width, img.height), maxSide * img.height / maxOf(img.width, img.height)) else img
+        val w = s.width; val h = s.height
+        if (w < 3 || h < 3) return 0.0
+        val l = FloatArray(w * h) { val p = s.pixels[it]; 0.299f * ((p shr 16) and 0xFF) + 0.587f * ((p shr 8) and 0xFF) + 0.114f * (p and 0xFF) }
+        var sum = 0.0; var sq = 0.0; var n = 0
+        for (y in 1 until h - 1) for (x in 1 until w - 1) {
+            val i = y * w + x
+            val v = (l[i - 1] + l[i + 1] + l[i - w] + l[i + w] - 4 * l[i]).toDouble()
+            sum += v; sq += v * v; n++
+        }
+        val mean = sum / n
+        return sq / n - mean * mean
     }
 
     /**

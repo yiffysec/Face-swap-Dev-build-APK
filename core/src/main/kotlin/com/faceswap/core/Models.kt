@@ -281,10 +281,12 @@ class FaceParser(private val model: InferenceModel) : Closeable {
         val classes = logits.size / n
         val wanted = BooleanArray(classes).also { w -> regions.forEach { if (it.label < classes) w[it.label] = true } }
         val m = FloatArray(n)
-        for (i in 0 until n) {
-            var best = 0; var bv = logits[i]
-            for (c in 1 until classes) { val v = logits[c * n + i]; if (v > bv) { bv = v; best = c } }
-            m[i] = if (wanted[best]) 1f else 0f
+        Par.rows(size, size * classes) { from, to ->
+            for (i in from * size until to * size) {
+                var best = 0; var bv = logits[i]
+                for (c in 1 until classes) { val v = logits[c * n + i]; if (v > bv) { bv = v; best = c } }
+                m[i] = if (wanted[best]) 1f else 0f
+            }
         }
         val resized = if (crop.width == size) m else MaskOps.resize(m, size, size, crop.width, crop.height)
         return MaskOps.softenHard(resized, crop.width, crop.height, sigma = 5f * crop.width / 512f)

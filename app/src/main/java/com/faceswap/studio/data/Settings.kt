@@ -13,13 +13,21 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 
-enum class Accelerator(val label: String) {
-    AUTO("Auto (tuned)"), CPU("CPU"), XNNPACK("XNNPACK"), NNAPI("NNAPI"), QNN("QNN NPU"), GPU("LiteRT GPU")
+enum class Accelerator(val label: String, val hint: String) {
+    AUTO("Auto (tuned)", "Fastest verified backend per model"),
+    CPU("CPU", "Always works, slowest"),
+    XNNPACK("XNNPACK", "Optimised CPU kernels"),
+    NNAPI("NNAPI", "Tensor TPU via NNAPI (not on Snapdragon)"),
+    QNN("NPU (QNN)", "Snapdragon Hexagon NPU"),
+    GPU("GPU (LiteRT)", "Models with a GPU twin"),
 }
 
 /** [boost] = pixel-boost factor over the swapper's native size; [enhance] = run the face enhancer. */
-enum class QualityPreset(val label: String, val boost: Int, val enhance: Boolean) {
-    FAST("Fast", 1, false), BALANCED("Balanced", 1, true), HIGH("High", 2, true), ULTRA("Ultra", 4, true)
+enum class QualityPreset(val label: String, val boost: Int, val enhance: Boolean, val hint: String) {
+    FAST("Fast", 1, false, "Native resolution, no enhancer"),
+    BALANCED("Balanced", 1, true, "Native + face enhancer"),
+    HIGH("High", 2, true, "2× pixel boost + enhancer"),
+    ULTRA("Ultra", 4, true, "4× pixel boost + enhancer"),
 }
 
 data class AppSettings(
@@ -52,6 +60,10 @@ data class AppSettings(
     val videoWorkers: Int = 2,
     val keepAudio: Boolean = true,
     val frameEnhancerId: String = ModelIds.SPAN_X4,
+    /** Show an instant native-resolution preview while the full-quality photo renders. */
+    val draftPreview: Boolean = true,
+    /** Video: skip the enhancer on faces whose swap is already as sharp as the original frame. */
+    val smartEnhance: Boolean = true,
 ) {
     fun nativeSize(): Int = if (swapperId.startsWith("inswapper")) 128 else 256
 
@@ -83,6 +95,7 @@ data class AppSettings(
         expressionRestore = expressionRestore,
         expressionAreas = setOf(MaskOps.Area.UPPER_FACE, MaskOps.Area.LOWER_FACE),
         debugOverlay = debugOverlay,
+        adaptiveEnhance = forVideo && smartEnhance,
     )
 }
 
@@ -130,6 +143,8 @@ class SettingsStore(context: Context) {
             videoWorkers = i("videoWorkers", d.videoWorkers),
             keepAudio = b("keepAudio", d.keepAudio),
             frameEnhancerId = s("frameEnhancerId", d.frameEnhancerId),
+            draftPreview = b("draftPreview", d.draftPreview),
+            smartEnhance = b("smartEnhance", d.smartEnhance),
         )
     }
 
@@ -147,6 +162,7 @@ class SettingsStore(context: Context) {
             .put("referenceThreshold", s.referenceThreshold).put("detectorSize", s.detectorSize).put("accelerator", s.accelerator.name)
             .put("threads", s.threads).put("rootBoost", s.rootBoost).put("videoMaxSide", s.videoMaxSide).put("videoEnhance", s.videoEnhance)
             .put("videoWorkers", s.videoWorkers).put("keepAudio", s.keepAudio).put("frameEnhancerId", s.frameEnhancerId)
+            .put("draftPreview", s.draftPreview).put("smartEnhance", s.smartEnhance)
         prefs.edit().putString("json", j.toString()).apply()
         _settings.value = s
     }

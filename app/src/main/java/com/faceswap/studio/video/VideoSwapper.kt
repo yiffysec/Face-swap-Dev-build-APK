@@ -160,14 +160,15 @@ class VideoSwapper(private val context: Context) {
 
             var lastPts = 0L
             var perfStarted = false
+            var lastOut: RgbImage? = null
             fun flush(all: Boolean) {
                 while (pending.isNotEmpty() && (all || pending.size > workers || pending.first().second.isDone)) {
                     val (pts, fut, swapped) = pending.removeFirst()
-                    val tf = System.currentTimeMillis()
-                    val outFrame = Yuv.rotate(fut.get(), (360 - rotation) % 360)
-                    queueToEncoder(outFrame, pts, false)
+                    val rendered = fut.get()
+                    lastOut = rendered
+                    queueToEncoder(Yuv.rotate(rendered, (360 - rotation) % 360), pts, false)
                     swappedTotal += swapped
-                    perf?.report(System.currentTimeMillis() - tf)
+                    perf?.frameDone()
                 }
             }
             while (!encoderDone) {
@@ -196,14 +197,17 @@ class VideoSwapper(private val context: Context) {
                             val plan = engine.analyze(upright, mappings, config, tracker, explicitOverride = explicit)
                             val fut = pool.submit<RgbImage> { engine.render(upright, plan, config) }
                             pending.addLast(Triple(pts, fut, plan.assignments.size))
-                            if (!perfStarted && tids.isNotEmpty()) { perf?.begin(null, tids.toList() + android.os.Process.myTid(), 1000L / fps.coerceAtLeast(1), false); perfStarted = true }
+                            if (!perfStarted && tids.size >= minOf(workers.coerceIn(1, 4), frameNo + 1)) {
+                                perf?.hint(tids.toList() + android.os.Process.myTid(), 1000L / fps.coerceAtLeast(1)); perfStarted = true
+                            }
                             flush(false)
                             lastPts = pts
                             frameNo++
                             if (frameNo % 10 == 1) {
                                 val el = (System.currentTimeMillis() - t0) / 1000f
                                 val rate = frameNo / max(0.001f, el)
-                                val preview = runCatching { fut.get() }.getOrNull() ?: upright
+                                // newest finished frame – never block the pipeline on the frame just submitted
+                                val preview = lastOut ?: upright
                                 onProgress(VideoProgress(frameNo, totalFrames, rate, ((totalFrames - frameNo) / max(0.01f, rate)).roundToInt(), swappedTotal,
                                     Bitmaps.toBitmap(ImageOps.resize(preview, preview.width / 2, preview.height / 2))))
                             }
@@ -235,7 +239,6 @@ class VideoSwapper(private val context: Context) {
             VideoResult(output, frameNo, (System.currentTimeMillis() - t0) / 1000f, audioCopied)
         } finally {
             pool.shutdownNow()
-            perf?.end(null)
             runCatching { decoder?.stop() }; runCatching { decoder?.release() }
             runCatching { encoder?.stop() }; runCatching { encoder?.release() }
             runCatching { if (muxerStarted) muxer?.stop() }; runCatching { muxer?.release() }
@@ -263,22 +266,28 @@ object Yuv {
         val w = crop.width(); val h = crop.height()
         val out = RgbImage(w, h)
         val y = image.planes[0]; val u = image.planes[1]; val v = image.planes[2]
-        val yb = y.buffer; val ub = u.buffer; val vb = v.buffer
+        // bulk-copy planes once (per-pixel ByteBuffer.get(index) is several times slower)
+        fun bytes(b: ByteBuffer) = b.duplicate().let { d -> d.position(0); ByteArray(d.limit()).also { d.get(it) } }
+        val yb = bytes(y.buffer); val ub = bytes(u.buffer); val vb = bytes(v.buffer)
         val yRow = y.rowStride; val yPix = y.pixelStride
         val uRow = u.rowStride; val uPix = u.pixelStride
         val vRow = v.rowStride; val vPix = v.pixelStride
-        for (j in 0 until h) {
-            val sy = j + crop.top
-            for (i in 0 until w) {
-                val sx = i + crop.left
-                val yy = (yb.get(sy * yRow + sx * yPix).toInt() and 0xFF) - 16
-                val cu = (ub.get((sy / 2) * uRow + (sx / 2) * uPix).toInt() and 0xFF) - 128
-                val cv = (vb.get((sy / 2) * vRow + (sx / 2) * vPix).toInt() and 0xFF) - 128
-                val c = 1.164f * yy
-                val r = (c + 1.596f * cv).toInt().coerceIn(0, 255)
-                val g = (c - 0.392f * cu - 0.813f * cv).toInt().coerceIn(0, 255)
-                val b = (c + 2.017f * cu).toInt().coerceIn(0, 255)
-                out.pixels[j * w + i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        val op = out.pixels
+        com.faceswap.core.Par.rows(h, w) { from, to ->
+            for (j in from until to) {
+                val sy = j + crop.top
+                val yo = sy * yRow; val uo = (sy / 2) * uRow; val vo = (sy / 2) * vRow
+                for (i in 0 until w) {
+                    val sx = i + crop.left
+                    val yy = (yb[yo + sx * yPix].toInt() and 0xFF) - 16
+                    val cu = (ub[uo + (sx / 2) * uPix].toInt() and 0xFF) - 128
+                    val cv = (vb[vo + (sx / 2) * vPix].toInt() and 0xFF) - 128
+                    val c = 1.164f * yy
+                    val r = (c + 1.596f * cv).toInt().coerceIn(0, 255)
+                    val g = (c - 0.392f * cu - 0.813f * cv).toInt().coerceIn(0, 255)
+                    val b = (c + 2.017f * cu).toInt().coerceIn(0, 255)
+                    op[j * w + i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
             }
         }
         return out
@@ -288,16 +297,22 @@ object Yuv {
         val w = minOf(src.width, image.width); val h = minOf(src.height, image.height)
         val y = image.planes[0]; val u = image.planes[1]; val v = image.planes[2]
         val yb = y.buffer; val ub = u.buffer; val vb = v.buffer
-        for (j in 0 until h) for (i in 0 until w) {
-            val p = src.pixels[j * src.width + i]
-            val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
-            val yy = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
-            yb.put(j * y.rowStride + i * y.pixelStride, yy.coerceIn(0, 255).toByte())
-            if (j % 2 == 0 && i % 2 == 0) {
-                val cu = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
-                val cv = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
-                ub.put((j / 2) * u.rowStride + (i / 2) * u.pixelStride, cu.coerceIn(0, 255).toByte())
-                vb.put((j / 2) * v.rowStride + (i / 2) * v.pixelStride, cv.coerceIn(0, 255).toByte())
+        val yRow = y.rowStride; val yPix = y.pixelStride
+        val uRow = u.rowStride; val uPix = u.pixelStride
+        val vRow = v.rowStride; val vPix = v.pixelStride
+        // absolute puts on disjoint indices are thread-safe
+        com.faceswap.core.Par.rows(h, w) { from, to ->
+            for (j in from until to) for (i in 0 until w) {
+                val p = src.pixels[j * src.width + i]
+                val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
+                val yy = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
+                yb.put(j * yRow + i * yPix, yy.coerceIn(0, 255).toByte())
+                if (j % 2 == 0 && i % 2 == 0) {
+                    val cu = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
+                    val cv = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
+                    ub.put((j / 2) * uRow + (i / 2) * uPix, cu.coerceIn(0, 255).toByte())
+                    vb.put((j / 2) * vRow + (i / 2) * vPix, cv.coerceIn(0, 255).toByte())
+                }
             }
         }
     }

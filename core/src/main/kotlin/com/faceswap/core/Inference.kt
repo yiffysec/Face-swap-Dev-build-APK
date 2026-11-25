@@ -38,6 +38,14 @@ interface InferenceModel : Closeable {
     val backend: String
 }
 
+/**
+ * Process-wide workload hint. Long jobs (video, live) set [sustained] so NPU backends switch from "burst" clocks
+ * (fastest single photo, throttles within seconds) to sustained high-performance clocks.
+ */
+object PerfHints {
+    @Volatile var sustained = false
+}
+
 /** Loads a model file on the configured backend. The app supplies one per model (tuned backend choice). */
 fun interface ModelLoader {
     fun load(file: File): InferenceModel
@@ -49,6 +57,8 @@ class OrtModel(
     file: File,
     options: OrtSession.SessionOptions,
     override val backend: String = "ORT/CPU",
+    /** Per-run config entries (e.g. QNN "qnn.htp_perf_mode"), evaluated on every run. */
+    private val runConfig: (() -> Map<String, String>)? = null,
 ) : InferenceModel {
     private val session: OrtSession = env.createSession(file.absolutePath, options)
     override val name: String = file.nameWithoutExtension
@@ -61,13 +71,16 @@ class OrtModel(
 
     override fun run(inputs: Map<String, Tensor>): Map<String, Tensor> {
         val ort = HashMap<String, OnnxTensor>()
+        val ro = runConfig?.invoke()?.takeIf { it.isNotEmpty() }?.let { cfg ->
+            OrtSession.RunOptions().also { r -> cfg.forEach { (k, v) -> r.addRunConfigEntry(k, v) } }
+        }
         try {
             for ((k, t) in inputs) {
                 ort[k] = if (inputTypes[k] == OnnxJavaType.DOUBLE)
                     OnnxTensor.createTensor(env, DoubleBuffer.wrap(DoubleArray(t.size) { t.data[it].toDouble() }), t.shape)
                 else OnnxTensor.createTensor(env, FloatBuffer.wrap(t.data), t.shape)
             }
-            session.run(ort).use { res ->
+            (if (ro != null) session.run(ort, ro) else session.run(ort)).use { res ->
                 val out = LinkedHashMap<String, Tensor>()
                 for (i in 0 until res.size()) {
                     val v = res.get(i) as OnnxTensor
@@ -83,6 +96,7 @@ class OrtModel(
             }
         } finally {
             ort.values.forEach { it.close() }
+            ro?.close()
         }
     }
 

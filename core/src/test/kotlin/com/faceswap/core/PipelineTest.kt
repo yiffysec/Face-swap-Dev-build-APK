@@ -109,6 +109,31 @@ class PipelineTest {
     }
 
     @Test
+    fun draftAndAdaptiveEnhance() {
+        assumeTrue(ready() && has(ModelIds.HYPERSWAP_1A) && has(ModelIds.GPEN_256))
+        engine().use { e ->
+            val source = e.buildSource("s", "S", listOf(src to e.detect(src).maxBy { it.area }))
+            val cfg = SwapConfig(pixelBoost = 512, enhancerId = ModelIds.GPEN_256)
+            val plan = e.analyze(tgt, listOf(FaceMapping(source)), cfg, explicitOverride = false)
+            e.render(tgt, plan, cfg) // warm-up: model loading isn't part of the comparison
+            var t = System.currentTimeMillis()
+            val draft = e.render(tgt, plan, cfg, draft = true)
+            val draftMs = System.currentTimeMillis() - t
+            t = System.currentTimeMillis()
+            val full = e.render(tgt, plan, cfg)
+            val fullMs = System.currentTimeMillis() - t
+            println("draft $draftMs ms vs final $fullMs ms")
+            assertTrue(identityAfter(e, draft, source) > 0.4f)
+            assertTrue(draftMs < fullMs)
+            // the 240p example face is small: the swap is already as sharp as the original, so the enhancer is skipped
+            val before = e.enhanceSkipped
+            e.render(tgt, plan, cfg.copy(adaptiveEnhance = true))
+            println("adaptive enhance skipped ${e.enhanceSkipped - before} face(s)")
+            save(full, "final_boost512_gpen.png"); save(draft, "draft.png")
+        }
+    }
+
+    @Test
     fun processors() {
         assumeTrue(ready())
         engine().use { e ->
