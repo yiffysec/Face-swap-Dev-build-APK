@@ -19,10 +19,11 @@ import onnx
 import onnxruntime as ort
 from onnx import numpy_helper
 
+# small → large: the biggest GANs go last, so a memory/time skip never costs the cheap wins
 DEFAULT_IDS = [
-    "yunet_2023_mar", "scrfd_2.5g", "arcface_w600k_r50", "hrffa", "hyperswap_1a_256", "hyperswap_1b_256",
-    "hyperswap_1c_256", "bisenet_resnet_18", "gpen_bfr_256", "gpen_bfr_512", "gfpgan_1.4", "modnet",
-    "span_kendata_x4", "real_esrgan_x2_fp16", "real_esrgan_x4_fp16", "real_esrgan_general_x4v3", "open_nsfw",
+    "yunet_2023_mar", "scrfd_2.5g", "span_kendata_x4", "real_esrgan_general_x4v3", "open_nsfw", "hrffa", "modnet",
+    "bisenet_resnet_18", "real_esrgan_x2_fp16", "real_esrgan_x4_fp16", "gpen_bfr_256", "arcface_w600k_r50",
+    "hyperswap_1a_256", "hyperswap_1b_256", "hyperswap_1c_256", "gpen_bfr_512", "gfpgan_1.4",
 ]
 MAPPING_VERSION = 2  # 2 = tensors addressed by signature name (LiteRT CompiledModel runs by signature)
 
@@ -88,6 +89,40 @@ def feeds_for(sess, rng):
     return feeds
 
 
+MAX_RSS = int(float(os.environ.get("CONVERT_MAX_GB", "9")) * (1 << 30))
+MAX_SECONDS = int(os.environ.get("CONVERT_MAX_MIN", "20")) * 60
+
+
+class Guarded:
+    def __init__(self, code, out):
+        self.returncode = code; self.stdout = out; self.stderr = ""
+
+
+def run_guarded(cmd):
+    """onnx2tf on a big GAN can eat the runner's RAM and take the whole CI job down. Watch the process tree and
+    kill it above MAX_RSS or MAX_SECONDS – the model is then just skipped (no GPU twin)."""
+    import psutil, time
+    log = tempfile.TemporaryFile(mode="w+")
+    p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
+    t0 = time.time(); reason = None
+    while p.poll() is None:
+        time.sleep(2)
+        try:
+            proc = psutil.Process(p.pid)
+            rss = proc.memory_info().rss + sum(c.memory_info().rss for c in proc.children(recursive=True))
+        except psutil.Error:
+            continue
+        if rss > MAX_RSS: reason = f"memory limit ({rss / 2**30:.1f} GB)"
+        elif time.time() - t0 > MAX_SECONDS: reason = "time limit"
+        if reason:
+            for c in psutil.Process(p.pid).children(recursive=True):
+                c.kill()
+            p.kill(); p.wait()
+            return Guarded(1, "skipped: " + reason)
+    log.seek(0)
+    return Guarded(p.returncode, log.read())
+
+
 def convert(models_dir: str, mid: str) -> str:
     src = os.path.join(models_dir, f"{mid}.onnx")
     if not os.path.exists(src):
@@ -109,7 +144,7 @@ def convert(models_dir: str, mid: str) -> str:
         cmd = [sys.executable, "-m", "onnx2tf", "-i", work, "-o", os.path.join(tmp, "out"), "-n", "-osd", "-tb", "tf_converter"]
         if img_inputs:
             cmd += ["-k"] + img_inputs
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        r = run_guarded(cmd)
         fp16 = os.path.join(tmp, "out", f"{mid}_float16.tflite")
         if r.returncode != 0 or not os.path.exists(fp16):
             return "convert-failed: " + (r.stderr or r.stdout)[-300:].replace("\n", " ")
