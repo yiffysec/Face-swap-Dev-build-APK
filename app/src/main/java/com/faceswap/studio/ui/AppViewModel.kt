@@ -111,6 +111,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return FileProvider.getUriForFile(getApplication(), getApplication<Application>().packageName + ".files", out)
     }
 
+    /** Any failure in a background action becomes a message + breadcrumb instead of an app crash. */
+    private val errors = kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
+        Diagnostics.crumb("action failed: $t")
+        _toast.value = "Error: ${t.message ?: t.javaClass.simpleName}"
+        _photo.update { if (it.busy || it.toolBusy != null) it.copy(busy = false, toolBusy = null, refining = false, status = "Error: ${t.message}") else it }
+    }
+    private fun launch(block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit) = viewModelScope.launch(errors, block = block)
+
     private val downloadJobs = HashMap<String, Job>()
     private var videoJob: Job? = null
     private var photoTargetRgb: RgbImage? = null
@@ -124,8 +132,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun modelTitle(id: String) = ModelCatalog.byId(id)?.title ?: id
     fun swapperLabel(id: String) = modelTitle(id).removeSuffix(" 128")
 
-    /** Short status for the header chip: backend mode + whether tuning ran. */
-    fun engineStatus(): String {
+    /** Short status for the header chip: backend mode + whether tuning ran (state – reading tuning results hits disk). */
+    private val _engineStatus by lazy { MutableStateFlow(computeEngineStatus()) }
+    val engineStatus: StateFlow<String> get() = _engineStatus
+    private fun computeEngineStatus(): String {
         val s = settings.value
         if (s.accelerator != com.faceswap.studio.data.Accelerator.AUTO) return s.accelerator.label
         val best = a.tuning.best()
@@ -135,28 +145,37 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
-        viewModelScope.launch { library.load() }
-        viewModelScope.launch { models.installBundled() }
+        launch { library.load() }
+        launch { models.installBundled() }
     }
 
     fun consumeToast() { _toast.value = null }
     private fun toast(msg: String) { _toast.value = msg }
 
     // ---------------------------------------------------------------- settings
-    fun updateSettings(t: (AppSettings) -> AppSettings) = a.settings.update(t)
+    fun updateSettings(t: (AppSettings) -> AppSettings) {
+        val before = settings.value.accelerator
+        a.settings.update(t)
+        if (settings.value.accelerator != before) _engineStatus.value = computeEngineStatus()
+    }
 
     // ---------------------------------------------------------------- models
     fun download(spec: ModelSpec) {
         if (downloadJobs[spec.id]?.isActive == true) return
-        downloadJobs[spec.id] = viewModelScope.launch { models.download(spec) }
+        downloadJobs[spec.id] = launch { models.download(spec) }
     }
     fun downloadRequired() = ModelCatalog.all.filter { it.required && !models.file(it).exists() }.forEach { download(it) }
-    fun importModels(uris: List<Uri>) = viewModelScope.launch {
+    fun importModels(uris: List<Uri>) = launch {
         val names = models.importFromUris(uris)
         toast(if (names.isEmpty()) "No recognised model files (expected names like inswapper_128_fp16.onnx)" else "Imported ${names.joinToString()}")
     }
     fun cancelDownload(spec: ModelSpec) { downloadJobs.remove(spec.id)?.cancel() }
-    fun deleteModel(spec: ModelSpec) = viewModelScope.launch { a.engine.release(); models.delete(spec) }
+    private fun jobRunning() = _video.value.running || _photo.value.busy || _photo.value.toolBusy != null || _live.value.faceId != null
+
+    fun deleteModel(spec: ModelSpec) {
+        if (jobRunning()) { toast("Finish or cancel the running job first"); return }
+        launch { a.engine.release(); models.delete(spec); refreshPerf() }
+    }
 
     private suspend fun engine() = try {
         _engineLoading.value = true
@@ -173,7 +192,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var tunerLaunches = 0
 
     private val _perfRows = MutableStateFlow(perfRows()); val perfRows = _perfRows.asStateFlow()
-    fun refreshPerf() { _perfRows.value = perfRows(); _tuningSummary.value = summary() }
+    fun refreshPerf() { _perfRows.value = perfRows(); _tuningSummary.value = summary(); _engineStatus.value = computeEngineStatus(); _tuned.value = a.tuning.best().isNotEmpty() to a.tuning.isComplete() }
+    /** (has results, last run complete) */
+    private val _tuned = MutableStateFlow(a.tuning.best().isNotEmpty() to a.tuning.isComplete()); val tuned = _tuned.asStateFlow()
 
     private fun perfRows(): List<PerfRow> {
         val best = a.tuning.best()
@@ -201,9 +222,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Called before (re)starting the tuner. Returns false when it should stop retrying. */
     fun beginTuning(fresh: Boolean): Boolean {
+        if (fresh && jobRunning()) { toast("Finish or cancel the running job first"); return false }
         if (fresh) { tunerLaunches = 0; a.tuning.reset() }
         if (tunerLaunches++ >= 10) { toast("Tuning stopped after repeated crashes – results so far are used"); return false }
-        viewModelScope.launch { a.engine.release() } // free memory for the tuner process
+        launch { a.engine.release() } // free memory for the tuner process
         return true
     }
 
@@ -244,7 +266,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun importFromGallery(uri: Uri) = startImport(uri, live = false, deleteAfter = null)
 
-    private fun startImport(uri: Uri, live: Boolean, deleteAfter: File?) = viewModelScope.launch {
+    private fun startImport(uri: Uri, live: Boolean, deleteAfter: File?) = launch {
         _importing.value = true
         try {
             Diagnostics.crumb("import: decoding image (live=$live)")
@@ -278,7 +300,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun chooseImportFace(face: TargetFace, label: String) {
         val st = _import.value ?: return
         _import.value = null
-        viewModelScope.launch { saveImported(st, face, label.ifBlank { defaultLabel(st.live) }) }
+        launch { saveImported(st, face, label.ifBlank { defaultLabel(st.live) }) }
     }
     fun cancelImport() { _import.value = null }
 
@@ -290,8 +312,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         toast("Saved “${saved.label}” to library" + if (saved.isLive) " (live)" else "")
     }
 
-    fun renameFace(id: String, label: String) = viewModelScope.launch { library.rename(id, label) }
-    fun deleteFace(id: String) = viewModelScope.launch {
+    fun renameFace(id: String, label: String) = launch { library.rename(id, label) }
+    fun deleteFace(id: String) = launch {
         library.delete(id)
         _photo.update { it.copy(setup = it.setup.without(id)) }
         _video.update { it.copy(setup = it.setup.without(id)) }
@@ -356,7 +378,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (video) setVideoTarget(uri) else setPhotoTarget(uri)
     }
 
-    fun setPhotoTarget(uri: Uri) = viewModelScope.launch {
+    fun setPhotoTarget(uri: Uri) = launch {
+        photoJob?.cancel()
         _photo.update { PhotoState(busy = true, status = "Detecting faces…", setup = SwapSetup(quickSources = it.setup.quickSources)) }
         try {
             val bmp = withContext(Dispatchers.IO) { Bitmaps.decode(getApplication(), uri) }
@@ -378,7 +401,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val mappings = buildMappings(st.setup)
         if (mappings.isEmpty()) { toast("Pick a source face first"); return }
         photoJob?.cancel()
-        photoJob = viewModelScope.launch {
+        photoJob = launch {
             _photo.update { it.copy(busy = true, status = "Swapping…", result = null, savedUri = null, timings = emptyMap(), refining = false) }
             Diagnostics.crumb("photo: swap ${rgb.width}x${rgb.height}, ${mappings.size} mapping(s), preset=${settings.value.preset}")
             val s = settings.value
@@ -432,7 +455,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun applyStudio(op: StudioOp) {
         val base = _photo.value.result ?: _photo.value.target ?: return
-        viewModelScope.launch {
+        launch {
             _photo.update { it.copy(toolBusy = op.label, status = null) }
             Diagnostics.crumb("studio: $op")
             try {
@@ -441,17 +464,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val out = withContext(Dispatchers.Default) {
                     val rgb = Bitmaps.toRgb(base)
                     val faces by lazy { e.detect(rgb, s.toConfig()) }
+                    val needsFaces = op is StudioOp.Age || op is StudioOp.Edit || op is StudioOp.Enhance
+                    if (needsFaces && faces.isEmpty()) throw IllegalStateException("No face found in this picture")
                     when (op) {
                         is StudioOp.Age -> faces.fold(rgb) { img, f -> e.processors.modifyAge(img, f, op.current, op.target, s.maskBlur) }
                         is StudioOp.Background -> e.processors.replaceBackground(rgb, op.mode)
-                        is StudioOp.Upscale -> e.processors.enhanceFrame(rgb, op.modelId)
+                        is StudioOp.Upscale -> {
+                            // cap the output at 64 MP (8192 px side): larger results don't fit in a Bitmap / memory
+                            val scale = e.processors.frameScale(op.modelId)
+                            val maxIn = 8192 / scale
+                            val input = if (maxOf(rgb.width, rgb.height) > maxIn) {
+                                val k = maxIn.toFloat() / maxOf(rgb.width, rgb.height)
+                                com.faceswap.core.ImageOps.resize(rgb, (rgb.width * k).toInt(), (rgb.height * k).toInt())
+                            } else rgb
+                            e.processors.enhanceFrame(input, op.modelId)
+                        }
                         is StudioOp.Edit -> faces.fold(rgb) { img, f -> e.processors.editFace(img, f, op.edit, s.maskBlur) }
                         is StudioOp.Enhance -> {
                             enhanceAll(e, rgb, faces, op.modelId, s)
                         }
                     }
                 }
-                _photo.update { it.copy(result = Bitmaps.toBitmap(out), history = (it.history + base).takeLast(8), toolBusy = null, showOriginal = false, savedUri = null) }
+                _photo.update { it.copy(result = Bitmaps.toBitmap(out), history = budgeted(it.history + base), toolBusy = null, showOriginal = false, savedUri = null) }
                 // heavy processors (FRAN 1 GB+ of activations, LivePortrait) are unloaded right away
                 if (op is StudioOp.Age || op is StudioOp.Edit || op is StudioOp.Upscale) a.engine.trim()
             } catch (t: Throwable) {
@@ -475,6 +509,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return out
     }
 
+    /** Background replacement with a picked image (decoded off the main thread). */
+    fun replaceBackgroundWith(uri: Uri) = launch {
+        val img = withContext(Dispatchers.IO) { Bitmaps.toRgb(Bitmaps.decode(getApplication(), uri, 2048)) }
+        applyStudio(StudioOp.Background(com.faceswap.core.Processors.Background.Image(img)))
+    }
+
+    /** Undo steps are full-size bitmaps: keep at most 8 and ~320 MB. */
+    private fun budgeted(list: List<Bitmap>): List<Bitmap> {
+        val out = ArrayList<Bitmap>()
+        var bytes = 0L
+        for (b in list.asReversed()) {
+            bytes += b.allocationByteCount
+            if (out.size >= 8 || (out.isNotEmpty() && bytes > 320L shl 20)) break
+            out.add(0, b)
+        }
+        return out
+    }
+
     fun undoStudio() = _photo.update { st ->
         if (st.history.isEmpty()) st else st.copy(result = st.history.last(), history = st.history.dropLast(1))
     }
@@ -482,10 +534,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Use the current result as the next target (chain swaps / tools). */
     fun resultAsTarget() {
         val r = _photo.value.result ?: return
-        viewModelScope.launch {
-            photoTargetRgb = Bitmaps.toRgb(r)
-            val faces = detectTargets(photoTargetRgb!!)
-            _photo.update { it.copy(target = r, result = null, history = emptyList(), setup = it.setup.copy(targetFaces = faces, assignments = emptyMap())) }
+        photoJob?.cancel()
+        launch {
+            _photo.update { it.copy(busy = true, status = "Detecting faces…") }
+            val rgb = withContext(Dispatchers.Default) { Bitmaps.toRgb(r) }
+            val faces = try { detectTargets(rgb) } finally { _photo.update { it.copy(busy = false) } }
+            photoTargetRgb = rgb
+            _photo.update { it.copy(target = r, result = null, history = emptyList(), timings = emptyMap(), savedUri = null, status = null,
+                setup = it.setup.copy(targetFaces = faces, assignments = emptyMap())) }
         }
     }
 
@@ -506,7 +562,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun liveAvailable() = models.has(com.faceswap.core.ModelIds.MFS_RUNTIME) && models.has(com.faceswap.core.ModelIds.MFS_BUILDER) && models.has(com.faceswap.core.ModelIds.MFS_ARCFACE)
 
     /** Camera screen visible: sustained NPU clocks for the duration. */
-    fun startLiveSession() { if (!liveActive) { liveActive = true; a.perf.beginJob(useRoot = false) } }
+    fun startLiveSession() { if (!liveActive) { liveActive = true; a.perf.beginJob(useRoot = false); a.engine.pin() } }
 
     /** Builds the MobileFaceSwap identity from the selected library face (once per face). */
     fun prepareLive(faceId: String) {
@@ -514,7 +570,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         liveJob?.cancel()
         liveIdentity = null
         _live.value = LiveState(faceId = faceId, message = "Preparing identity…")
-        liveJob = viewModelScope.launch {
+        liveJob = launch {
             try {
                 val e = engine()
                 val lf = library.faces.value.firstOrNull { it.id == faceId } ?: error("Face not found")
@@ -537,7 +593,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun stopLive() {
         liveJob?.cancel(); liveIdentity = null; liveEngine = null
         _live.value = LiveState(); _liveFrame.value = null
-        if (liveActive) { liveActive = false; a.perf.endJob() }
+        if (liveActive) { liveActive = false; a.perf.endJob(); a.engine.unpin() }
     }
 
     /** Camera analyzer thread: swaps the newest frame and publishes it. Unchanged frames pass through until ready. */
@@ -552,8 +608,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val decision = e.policy.evaluate(liveExplicit, liveSources)
         if (!decision.allowed) { _live.update { it.copy(message = policyMessage(decision)) }; _liveFrame.value = bmp; return }
         val cfg = settings.value.toConfig().copy(detectorSize = 320, landmarks68 = false)
-        val faces = runCatching { e.detect(rgb, cfg) }.getOrDefault(emptyList())
-        runCatching { e.previewSwap(rgb, faces, id, settings.value.maskBlur) }
+        val faces = try {
+            e.detect(rgb, cfg).also { e.previewSwap(rgb, faces = it, identity = id, blur = settings.value.maskBlur) }
+        } catch (t: Throwable) {
+            // engine rebuilt / models deleted underneath: ask for the face again instead of failing every frame
+            liveIdentity = null; liveEngine = null
+            _live.update { it.copy(ready = false, faceId = null, message = "Live preview stopped (${t.message ?: "engine changed"}) – tap a face to restart") }
+            _liveFrame.value = bmp; return
+        }
         _liveFrame.value = Bitmaps.toBitmap(rgb)
         val work = (System.nanoTime() - t) / 1e6f
         liveWorkMs = if (liveWorkMs == 0f) work else liveWorkMs * 0.9f + work * 0.1f
@@ -564,7 +626,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun savePhoto() {
         val bmp = _photo.value.result ?: return
-        viewModelScope.launch {
+        launch {
             val uri = withContext(Dispatchers.IO) { Bitmaps.saveToGallery(getApplication(), bmp, png = photoHasAlpha()) }
             _photo.update { it.copy(savedUri = uri) }
             toast(if (uri != null) "Saved to Pictures/FaceSwapStudio" else "Save failed")
@@ -580,7 +642,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---------------------------------------------------------------- video
-    fun setVideoTarget(uri: Uri) = viewModelScope.launch {
+    fun setVideoTarget(uri: Uri) = launch {
         if (_video.value.running) { toast("A video is already processing"); return@launch }
         _video.update { VideoState(uri = uri, status = "Reading video…", setup = SwapSetup(quickSources = it.setup.quickSources)) }
         try {
@@ -606,11 +668,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val mappings = buildMappings(st.setup)
         if (mappings.isEmpty()) { toast("Pick a source face first"); return }
         val s = settings.value
+        // previous render is replaced (Save copies it to the gallery) – the cache would otherwise grow by a video per run
+        File(getApplication<Application>().cacheDir, "outputs").listFiles()?.filter { it.name.startsWith("faceswap_") && it.extension == "mp4" }?.forEach { it.delete() }
         val out = File(getApplication<Application>().cacheDir, "outputs/faceswap_${System.currentTimeMillis()}.mp4")
-        videoJob = viewModelScope.launch {
+        videoJob = launch {
             _keepScreenOn.value = true
             _video.update { it.copy(running = true, progress = null, output = null, savedUri = null, status = "Loading models…") }
             Diagnostics.crumb("video: start maxSide=${s.videoMaxSide} enhance=${s.videoEnhance}")
+            a.engine.pin()
             try {
                 val e = engine()
                 _video.update { it.copy(status = null) }
@@ -631,6 +696,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 out.delete(); _video.update { it.copy(running = false, status = "Error: ${t.message}") }
             } finally {
                 a.perf.endJob()
+                a.engine.unpin()
                 _keepScreenOn.value = false
             }
         }
@@ -640,7 +706,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun saveVideo() {
         val f = _video.value.output ?: return
-        viewModelScope.launch {
+        launch {
             val uri = withContext(Dispatchers.IO) { Bitmaps.saveVideoToGallery(getApplication(), f) }
             _video.update { it.copy(savedUri = uri) }
             toast(if (uri != null) "Saved to Movies/FaceSwapStudio" else "Save failed")

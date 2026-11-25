@@ -52,7 +52,7 @@ fun StudioTools(vm: AppViewModel, nav: Navigator) {
     var tool by remember { mutableStateOf(Tool.EDIT) }
     val ctx = LocalContext.current
     val pickBg = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        uri?.let { runCatching { Bitmaps.toRgb(Bitmaps.decode(ctx, it, 2048)) }.getOrNull()?.let { img -> vm.applyStudio(AppViewModel.StudioOp.Background(Processors.Background.Image(img))) } }
+        uri?.let(vm::replaceBackgroundWith)
     }
 
     @Composable fun Missing(what: String) = Column {

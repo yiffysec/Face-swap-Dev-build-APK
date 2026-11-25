@@ -117,6 +117,9 @@ object Backends {
         else -> onnx
     }
 
+    /** Options newer than some QNN EP builds: dropped on retry if the EP rejects them. */
+    private val optionalQnnKeys = setOf("enable_htp_fp16_clamp_overflow", "htp_graph_finalization_optimization_mode", "qnn_context_priority")
+
     private fun qnnOptions(backend: Backend): Map<String, String> = when (backend) {
         Backend.QNN_GPU -> mapOf("backend_type" to "gpu", "backend_path" to "libQnnGpu.so", "qnn_context_priority" to "high")
         else -> mapOf(
@@ -135,7 +138,7 @@ object Backends {
      * @param strict NPU/GPU only: every node must run on the accelerator (session creation fails otherwise). The tuner
      * uses it to tell "fully offloaded" from "partly on CPU" – a partial offload often loses to plain CPU.
      */
-    fun ortOptions(context: Context, id: String, backend: Backend, threads: Int, strict: Boolean = false, writeContext: File? = null): OrtSession.SessionOptions = OrtSession.SessionOptions().apply {
+    fun ortOptions(context: Context, id: String, backend: Backend, threads: Int, strict: Boolean = false, writeContext: File? = null, minimalQnn: Boolean = false): OrtSession.SessionOptions = OrtSession.SessionOptions().apply {
         setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
         setIntraOpNumThreads(threads)
         setInterOpNumThreads(1)
@@ -158,7 +161,7 @@ object Backends {
                 }
                 val wanted = if (backend == Backend.QNN_GPU) OrtHardwareDevice.OrtHardwareDeviceType.GPU else OrtHardwareDevice.OrtHardwareDeviceType.NPU
                 val devices = QnnPlugin.devices(context).filter { it.device.type == wanted }
-                val opts = qnnOptions(backend)
+                val opts = qnnOptions(backend).let { o -> if (minimalQnn) o - optionalQnnKeys else o }
                 if (devices.isNotEmpty()) addExecutionProvider(devices, opts - "backend_path" - "backend_type")
                 else addQnn(opts - "backend_type") // legacy builds with QNN compiled into ORT
             }
@@ -207,7 +210,16 @@ object Backends {
                 .onFailure { Log.w("Backends", "cached NPU graph for $id unusable, recompiling", it) }
         }
         ctxDir(context).listFiles()?.filter { it.name.startsWith(prefix) }?.forEach { it.delete() }
-        val model = OrtModel(env, file, ortOptions(context, id, backend, threads, strict, writeContext = ctx), label, qnnRunConfig)
+        val model = try {
+            OrtModel(env, file, ortOptions(context, id, backend, threads, strict, writeContext = ctx), label, qnnRunConfig)
+        } catch (e: Exception) {
+            // an EP build that doesn't know one of the newer options rejects the whole session – retry without them
+            val msg = e.message.orEmpty()
+            if (!Regex("option|unknown|invalid|unsupported key", RegexOption.IGNORE_CASE).containsMatchIn(msg)) throw e
+            Log.w("Backends", "QNN rejected options for $id, retrying with the minimal set: $msg")
+            ctxDir(context).listFiles()?.filter { it.name.startsWith(prefix) }?.forEach { it.delete() }
+            OrtModel(env, file, ortOptions(context, id, backend, threads, strict, writeContext = ctx, minimalQnn = true), label, qnnRunConfig)
+        }
         if (ctx.exists()) stamp.writeText(want)
         return model
     }

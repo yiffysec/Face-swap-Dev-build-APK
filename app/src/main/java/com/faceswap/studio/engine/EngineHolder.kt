@@ -29,13 +29,21 @@ class EngineHolder(private val context: Context, private val models: ModelManage
     @Volatile var internalLiveCaptureMode = false
         set(value) { field = value; engine?.policy?.internalLiveCaptureMode = value }
 
+    /**
+     * Long jobs (video, live) pin the engine: a settings change that would rebuild it (other backend / threads) is
+     * deferred until they finish, because closing sessions that another thread is running crashes natively.
+     */
+    private val pins = java.util.concurrent.atomic.AtomicInteger()
+    fun pin() { pins.incrementAndGet() }
+    fun unpin() { pins.updateAndGet { maxOf(0, it - 1) } }
+
     /** Backend each loaded model actually ended up on (for the Settings screen). */
     val loadedBackends = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     suspend fun get(settings: AppSettings): FaceSwapEngine = mutex.withLock {
         withContext(Dispatchers.Default) {
             val key = Triple(settings.accelerator, settings.threads, tuning.version)
-            engine?.let { if (builtWith == key) return@withContext it }
+            engine?.let { if (builtWith == key || pins.get() > 0) return@withContext it }
             engine?.close(); engine = null; loadedBackends.clear()
             check(models.requiredReady) { "Required models are not downloaded yet" }
             Diagnostics.crumb("engine: building (${settings.accelerator}, ${settings.threads} threads)")
@@ -89,7 +97,7 @@ class EngineHolder(private val context: Context, private val models: ModelManage
     private fun defaultBackend(@Suppress("UNUSED_PARAMETER") id: String) = Backend.CPU
 
     /** Frees model memory but keeps the engine (next use reloads lazily). */
-    suspend fun trim() = mutex.withLock { engine?.unloadAll(); loadedBackends.clear() }
+    suspend fun trim() = mutex.withLock { if (pins.get() == 0) { engine?.unloadAll(); loadedBackends.clear() } }
 
-    suspend fun release() = mutex.withLock { engine?.close(); engine = null; builtWith = null; loadedBackends.clear() }
+    suspend fun release() = mutex.withLock { if (pins.get() == 0) { engine?.close(); engine = null; builtWith = null; loadedBackends.clear() } }
 }

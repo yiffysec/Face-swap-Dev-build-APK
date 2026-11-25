@@ -20,10 +20,11 @@ On-device photo and video face swapping for Android. All inference runs locally 
 
 **Live preview:** real-time camera swap with **MobileFaceSwap** (Baidu, AAAI-22), whose per-frame network is 364 KB.
 
-**Performance**
-- Backends: ONNX Runtime CPU / XNNPACK / NNAPI (fp16+fp32), **QNN HTP + GPU** (Snapdragon flavor), and **LiteRT GPU** (TFLite versions of models, converted and verified in CI).
-- *Tune for this device* benchmarks every installed model on every backend in an isolated process and checks each backend's output against CPU. Auto mode then uses the fastest correct backend per model.
-- QNN EP context caching (the HTP graph compiles once), big-core thread count, ADPF performance hints and sustained-performance mode.
+**Performance** (see `research/performance-game-plan.md` in the project for the research behind this)
+- Backends: ONNX Runtime 1.32 CPU / XNNPACK / NNAPI (Tensor TPU), Qualcomm's **QNN plugin EP 2.8** (QAIRT 2.52) on the Hexagon NPU in fp16 **and calibrated w8a16 INT8**, QNN GPU, and **LiteRT GPU** in fp16, fp16 + fp32 accumulation, and fp32.
+- *Settings → Performance → Tune* benchmarks every installed model on every backend the chip offers, in an isolated process, on a **real face input** captured in CI, and checks *all* outputs against fp32 CPU. NPU candidates must prove full offload first (CPU fallback disabled); partial offloads are measured and labelled. Auto then uses the fastest correct backend per model. NNAPI is never tried on Snapdragon (it has no NNAPI driver there).
+- NPU clocks: burst for single photos, sustained high-performance for video and live. The compiled NPU graph is cached and reused, and rebuilt automatically when the model or app changes.
+- Pipeline: row-parallel pixel stages (warp, paste-back, tensor conversion, mask blur, YUV), one face-parser pass per face, **instant draft preview** while High/Ultra and the enhancer render, **smart enhance** for video (skips faces already as sharp as the original), non-blocking video progress, ADPF hint sessions fed with real frame times.
 - Optional **root boost** (Pixel): CPU governors and memory-latency devfreq set to performance during video, restored afterwards. Thermal limits are never touched.
 - Diagnostics: offline crash reports with exit reasons and pipeline step logs.
 
@@ -32,9 +33,9 @@ On-device photo and video face swapping for Android. All inference runs locally 
 | Flavor | For | Runtime |
 |---|---|---|
 | `universal` | Pixel 8 Pro and other devices | ORT (CPU/XNNPACK/NNAPI) + LiteRT GPU |
-| `snapdragon` | Galaxy S24 Ultra | ORT with QNN EP (Hexagon HTP V75 / Adreno) + LiteRT GPU |
+| `snapdragon` | Galaxy S24 Ultra | + Qualcomm QNN plugin EP (Hexagon HTP V75 / Adreno) and the INT8 NPU twins of the core models |
 
-Core models (~0.85 GB) are bundled in both. Extras ship as offline **model packs** (`models-*.zip` on the release). Import them with *Models → Import* over USB.
+Core models (~0.85 GB) are bundled in both. Extras ship as offline **model packs** (`models-*.zip` on the release; `models-npu-int8.zip` holds the INT8 twins of the extras, Snapdragon only). Import them with *Settings → Models → Import* over USB. After installing a new build, run *Settings → Performance → Tune*.
 
 ## Content policy (explicit targets)
 
@@ -65,7 +66,7 @@ Implement `com.faceswap.core.IdentityVerifier` around your KYC provider. Its `cu
 
 `tools/prepare_models.py` fixes dynamic input shapes (SCRFD 640², ArcFace and open_nsfw batch 1) so NNAPI can offload whole graphs. CI runs it automatically; run it on `~/.cache/faceswap-models` for local builds.
 
-GitHub Actions (`.github/workflows/build.yml`) runs on every push. It downloads and caches all models, fixes their static shapes, converts them to TFLite for LiteRT GPU (best effort), runs the core tests, builds both flavors, packs the extra models, and publishes everything to a rolling pre-release named `internal-<branch>`.
+GitHub Actions (`.github/workflows/build.yml`) runs on every push. It downloads and caches all models, fixes their static shapes, converts them to TFLite for LiteRT GPU, captures calibration inputs from the real pipeline (`CalibrationDump` test) and builds **quality-gated w8a16 INT8 twins** for the NPU (`tools/quantize_qnn.py`: kept only if worst cosine ≥ 0.998 and PSNR ≥ 40 dB against fp32; `qnn-report.txt` lists the result per model), runs the core tests, builds both flavors, packs the extra models, and publishes everything to a rolling pre-release named `internal-<branch>`. GPU twins and INT8 twins are cached, so only the first run pays for conversion.
 
 Requirements: JDK 17+, Android SDK platform 36. minSdk 28 (Android 9).
 
@@ -91,12 +92,15 @@ core/   pure Kotlin/JVM pipeline (testable without a device)
   Geometry.kt     landmark alignment (Umeyama), NMS, templates
   Models.kt       SCRFD, ArcFace, InSwapper, GFPGAN, content analyser
   OnnxInitializerReader.kt  streams the inswapper emap matrix out of the .onnx
-  Engine.kt       FaceSwapEngine, pixel boost, tracker, mappings
+  Engine.kt       FaceSwapEngine: analyze/render stages, draft render, pixel boost, tracker, mappings
+  Processors.kt   FRAN age, background, frame upscaling, LivePortrait expression + face editor
+  Par.kt          row-parallel pixel loops · TensorFile.kt real-input tensor files (calibration, tuner)
   Policy.kt       explicit-target identity / live-capture policy
 app/    Android (Compose)
-  data/   ModelManager (download/bundle/import), FaceLibrary, PngText, Settings
-  engine/ EngineHolder (session options, accelerators)
-  video/  VideoSwapper (MediaCodec pipeline, YUV conversion)
-  ui/     screens
+  data/   ModelManager (download/bundle/import, twins), FaceLibrary, PngText, Settings
+  engine/ Backends + tuner (QNN plugin, LiteRT, NNAPI), EngineHolder, PerformanceManager (ADPF, root)
+  video/  VideoSwapper (MediaCodec pipeline, parallel render workers, YUV conversion)
+  ui/     Photo · Video · Live · Faces · Settings (Swapping, Masks, Performance, Models, Diagnostics)
+tools/  prepare_models.py (static shapes) · convert_tflite.py (GPU twins) · quantize_qnn.py (INT8 NPU twins)
   src/debug|release/.../internal/InternalTesting.kt  passphrase gate (absent from release)
 ```

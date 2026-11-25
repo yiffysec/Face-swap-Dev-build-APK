@@ -373,10 +373,12 @@ fun CompareCanvas(before: Bitmap, after: Bitmap?, modifier: Modifier = Modifier,
     }
 }
 
+/** [dim] = darken the picture (blocking work); false = a small badge at the bottom (e.g. refining over a draft). */
 @Composable
-fun BusyOverlay(text: String?, visible: Boolean, modifier: Modifier = Modifier) {
+fun BusyOverlay(text: String?, visible: Boolean, modifier: Modifier = Modifier, dim: Boolean = true) {
     AnimatedVisibility(visible, modifier) {
-        Box(Modifier.fillMaxSize().background(Color(0x66000000)), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxSize().background(if (dim) Color(0x66000000) else Color.Transparent).padding(12.dp),
+            contentAlignment = if (dim) Alignment.Center else Alignment.BottomCenter) {
             Surface(shape = CircleShape, color = Scrim) {
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)

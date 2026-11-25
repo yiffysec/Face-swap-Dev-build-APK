@@ -49,7 +49,8 @@ fun PhotoScreen(vm: AppViewModel, adders: FaceAdders, nav: Navigator) {
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp)) {
         ScreenHeader("Photo", "Swap faces in a picture – everything runs on this phone") {
-            Pill(vm.engineStatus(), onClick = { nav.toSettings(SettingsPage.PERFORMANCE) })
+            val engineStatus by vm.engineStatus.collectAsState()
+            Pill(engineStatus, onClick = { nav.toSettings(SettingsPage.PERFORMANCE) })
         }
 
         val target = st.target
@@ -60,6 +61,7 @@ fun PhotoScreen(vm: AppViewModel, adders: FaceAdders, nav: Navigator) {
                 BusyOverlay(
                     when { loading -> "Loading models…"; st.refining -> "Refining…"; st.busy -> st.status ?: "Working…"; st.toolBusy != null -> st.toolBusy; else -> null },
                     visible = st.busy || st.toolBusy != null,
+                    dim = !st.refining,
                 )
             }
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

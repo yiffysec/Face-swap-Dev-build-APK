@@ -91,7 +91,8 @@ private fun SettingsHub(vm: AppViewModel, onPage: (SettingsPage) -> Unit) {
         Panel(padding = 6.dp) {
             NavRow(Icons.Default.AutoFixHigh, "Swapping", "${s.preset.label} · ${vm.swapperLabel(s.swapperId)} · enhancer ${s.enhancerFor(false)?.let(vm::modelTitle) ?: "off"}") { onPage(SettingsPage.SWAP) }
             NavRow(Icons.Default.Masks, "Masks & blending", s.maskTypes.joinToString { it.name.lowercase() } + " · feather ${"%.2f".format(s.maskBlur)}") { onPage(SettingsPage.MASKS) }
-            NavRow(Icons.Default.Speed, "Performance", vm.engineStatus() + " · ${CpuInfo.chipName}") { onPage(SettingsPage.PERFORMANCE) }
+            val engineStatus by vm.engineStatus.collectAsState()
+            NavRow(Icons.Default.Speed, "Performance", engineStatus + " · ${CpuInfo.chipName}") { onPage(SettingsPage.PERFORMANCE) }
             NavRow(Icons.Default.Download, "Models", "$installed installed · ${mb(vm.models.totalBytes)} on device") { onPage(SettingsPage.MODELS) }
             NavRow(Icons.Default.BugReport, "Diagnostics & testing", if (vm.internalAvailable) "Crash reports · internal testing mode" else "Crash reports") { onPage(SettingsPage.DIAGNOSTICS) }
         }
@@ -202,11 +203,12 @@ private fun PerformanceSettings(vm: AppViewModel) {
             if (vm.rootAvailable) Pill("root", content = Good)
         }
         Spacer(Modifier.height(12.dp))
-        val tuned = vm.tuning.best().isNotEmpty()
+        val tunedState by vm.tuned.collectAsState()
+        val tuned = tunedState.first
         Button(onClick = { if (vm.beginTuning(fresh = true)) launchTuner() }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
             Icon(Icons.Default.Tune, null); Spacer(Modifier.size(8.dp)); Text(if (tuned) "Re-run device tuning" else "Tune for this device")
         }
-        Note(if (tuned) "Auto uses the fastest backend verified on a real face for each model." + (if (!vm.tuning.isComplete()) " Last run was incomplete." else "")
+        Note(if (tuned) "Auto uses the fastest backend verified on a real face for each model." + (if (!tunedState.second) " Last run was incomplete." else "")
         else "Not tuned yet – Auto runs every model on CPU until you tune (5–15 minutes; NPU/GPU compilation is the slow part).")
     }
 

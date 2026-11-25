@@ -51,7 +51,8 @@ fun VideoScreen(vm: AppViewModel, adders: FaceAdders, nav: Navigator) {
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp)) {
         ScreenHeader("Video", "Frame-by-frame swap with tracking, audio kept") {
-            Pill(vm.engineStatus(), onClick = { nav.toSettings(SettingsPage.PERFORMANCE) })
+            val engineStatus by vm.engineStatus.collectAsState()
+            Pill(engineStatus, onClick = { nav.toSettings(SettingsPage.PERFORMANCE) })
         }
 
         val img = st.progress?.preview ?: st.preview

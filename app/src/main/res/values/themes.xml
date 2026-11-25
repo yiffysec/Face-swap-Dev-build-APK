@@ -2,6 +2,6 @@
     <style name="Theme.FaceSwapStudio" parent="android:Theme.Material.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowBackground">#FF0E0F14</item>
+        <item name="android:windowBackground">#FF0B0C10</item>
     </style>
 </resources>

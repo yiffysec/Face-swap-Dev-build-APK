@@ -123,6 +123,8 @@ class TunerActivity : ComponentActivity() {
             val file = File(modelsDir, "$model.onnx")
             val sample = File(modelsDir, "$model.sample.bin").takeIf { it.exists() }?.let { runCatching { TensorFile.read(it) }.getOrNull() }
             var reference: List<FloatArray>? = null
+            // after a crash-restart, models whose every candidate already has a result are not re-run (CPU included)
+            if (plan.getValue(model).all { b -> trials.any { it.model == model && it.backend == b } }) continue
             for (backend in plan.getValue(model)) {
                 val done = trials.count { it.model in models }
                 ui { progress.value = done.toFloat() / total; headline.value = "$model · ${backend.label}" }

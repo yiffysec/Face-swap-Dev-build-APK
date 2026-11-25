@@ -20,7 +20,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        handleShare(intent)
+        // only on a fresh start: after rotation / process restore the same intent would wipe the current work
+        if (savedInstanceState == null) handleShare(intent)
         lifecycleScope.launch {
             vm.keepScreenOn.collect { on ->
                 if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
