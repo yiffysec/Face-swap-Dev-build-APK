@@ -128,6 +128,10 @@ def convert(models_dir: str, mid: str) -> str:
     if not os.path.exists(src):
         return "missing"
     out_tfl = os.path.join(models_dir, f"{mid}.tflite")
+    fail_mark = out_tfl + ".failed"
+    stamp = f"{MAPPING_VERSION}:{os.path.getsize(src)}"
+    if os.path.exists(fail_mark) and open(fail_mark).read().split("\n")[0] == stamp:
+        return "skipped (failed before: " + open(fail_mark).read().split("\n", 1)[-1][:120] + ")"
     if os.path.exists(out_tfl) and os.path.exists(out_tfl + ".json"):
         try:
             if json.load(open(out_tfl + ".json")).get("version") == MAPPING_VERSION:
@@ -207,6 +211,11 @@ def main():
             status = convert(models_dir, mid)
         except Exception as e:  # keep going: a failed model just won't have a GPU twin
             status = f"error: {e}"[:300]
+        # remember hard failures so later CI runs don't spend 20 min re-trying them (cleared by a converter change)
+        src = os.path.join(models_dir, f"{mid}.onnx")
+        if os.path.exists(src) and not status.startswith(("ok", "cached", "skipped", "missing")):
+            with open(os.path.join(models_dir, f"{mid}.tflite.failed"), "w") as f:
+                f.write(f"{MAPPING_VERSION}:{os.path.getsize(src)}\n{status}")
         print(f"{mid:28s} {status}", flush=True)
 
 
