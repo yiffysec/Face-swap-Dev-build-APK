@@ -647,12 +647,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _video.update { VideoState(uri = uri, status = "Reading video…", setup = SwapSetup(quickSources = it.setup.quickSources)) }
         try {
             val (frame, dur) = withContext(Dispatchers.IO) {
-                MediaMetadataRetriever().use { r ->
+                val r = MediaMetadataRetriever() // not AutoCloseable before API 29
+                try {
                     r.setDataSource(getApplication(), uri)
                     val d = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
                     val bmp = r.getFrameAtTime(minOf(1_000_000L, d * 500), MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                     bmp?.copy(Bitmap.Config.ARGB_8888, false) to d
-                }
+                } finally { r.release() }
             }
             if (frame == null) { _video.update { it.copy(status = "Could not read video frames") }; return@launch }
             val faces = detectTargets(Bitmaps.toRgb(frame))

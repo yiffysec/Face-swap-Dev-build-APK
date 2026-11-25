@@ -77,11 +77,11 @@ class PerformanceManager(private val context: Context) {
         val prev = lastReportNs
         lastReportNs = now
         if (prev == 0L) return
-        runCatching { hint?.reportActualWorkDuration(now - prev) }
+        if (Build.VERSION.SDK_INT >= 31) runCatching { hint?.reportActualWorkDuration(now - prev) }
     }
 
     @Synchronized
-    private fun closeHint() { runCatching { hint?.close() }; hint = null }
+    private fun closeHint() { if (Build.VERSION.SDK_INT >= 31) runCatching { hint?.close() }; hint = null }
 
     // ------------------------------------------------------------------------------------------------- root
 

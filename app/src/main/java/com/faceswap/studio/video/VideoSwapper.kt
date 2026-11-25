@@ -249,10 +249,11 @@ class VideoSwapper(private val context: Context) {
     private fun readRotation(uri: Uri, format: MediaFormat): Int {
         if (format.containsKey(MediaFormat.KEY_ROTATION)) return format.getInteger(MediaFormat.KEY_ROTATION)
         return runCatching {
-            MediaMetadataRetriever().use { r ->
+            val r = MediaMetadataRetriever() // not AutoCloseable before API 29
+            try {
                 r.setDataSource(context, uri)
                 r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toInt() ?: 0
-            }
+            } finally { r.release() }
         }.getOrDefault(0)
     }
 
