@@ -221,17 +221,35 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Called before (re)starting the tuner. Returns false when it should stop retrying. */
-    fun beginTuning(fresh: Boolean): Boolean {
+    /** Models the current settings actually use (quick tune). */
+    fun modelsInUse(): Set<String> {
+        val s = settings.value
+        val ids = mutableSetOf(s.detectorId, com.faceswap.core.ModelIds.ARCFACE, s.swapperId, com.faceswap.core.ModelIds.OPEN_NSFW)
+        if (s.landmarks68) ids += com.faceswap.core.ModelIds.HRFFA
+        if (com.faceswap.core.MaskType.REGION in s.maskTypes) ids += com.faceswap.core.ModelIds.BISENET
+        s.enhancerFor(false)?.let { ids += it }
+        s.enhancerFor(true)?.let { ids += it }
+        if (s.expressionRestore > 0f) ids += listOf(com.faceswap.core.ModelIds.LP_FEATURE, com.faceswap.core.ModelIds.LP_MOTION, com.faceswap.core.ModelIds.LP_GENERATOR)
+        if (liveAvailable()) ids += listOf(com.faceswap.core.ModelIds.MFS_RUNTIME, com.faceswap.core.ModelIds.MFS_BUILDER, com.faceswap.core.ModelIds.MFS_ARCFACE)
+        return ids.filter { models.has(it) }.toSet()
+    }
+
+    /** [all] = every installed model (slow); otherwise only the models in use, keeping other results. */
+    fun beginTuning(fresh: Boolean, all: Boolean = false): Boolean {
         if (fresh && jobRunning()) { toast("Finish or cancel the running job first"); return false }
-        if (fresh) { tunerLaunches = 0; a.tuning.reset() }
-        if (tunerLaunches++ >= 10) { toast("Tuning stopped after repeated crashes – results so far are used"); return false }
+        if (fresh) {
+            tunerLaunches = 0
+            if (all) { a.tuning.reset(); a.tuning.scope = null }
+            else modelsInUse().let { a.tuning.resetModels(it); a.tuning.scope = it }
+        }
+        if (tunerLaunches++ >= 10) { a.tuning.scope = null; toast("Tuning stopped after repeated crashes – results so far are used"); return false }
         launch { a.engine.release() } // free memory for the tuner process
         return true
     }
 
     fun onTunerFinished(ok: Boolean): Boolean {
         refreshPerf()
-        if (ok || a.tuning.isComplete()) { toast("Device tuning complete"); return false }
+        if (ok || a.tuning.isComplete()) { a.tuning.scope = null; toast("Device tuning complete"); return false }
         return true // crashed / closed: caller relaunches to continue
     }
 

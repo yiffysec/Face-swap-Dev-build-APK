@@ -99,15 +99,17 @@ object QnnPlugin {
 object Backends {
     /** Backends worth trying on this device for one model (the tuner still verifies each one). */
     fun candidates(context: Context, modelsDir: File, id: String): List<Backend> = buildList {
+        // Order matters: the tuner skips later candidates that can't win (see TunerActivity).
         add(Backend.CPU); add(Backend.XNNPACK)
         if (CpuInfo.isSnapdragon) {
-            add(Backend.QNN_HTP)
+            // INT8 first: if it fully offloads and verifies, the fp16 NPU graph (a multi-minute compile for the big
+            // models) is skipped. QNN GPU is not tried – LiteRT GPU covers the Adreno and compiles in seconds.
             if (File(modelsDir, "$id.qdq.onnx").exists()) add(Backend.QNN_HTP_INT8)
-            add(Backend.QNN_GPU)
+            add(Backend.QNN_HTP)
         } else {
-            add(Backend.NNAPI_FP16); add(Backend.NNAPI)
+            add(Backend.NNAPI_FP16) // fp32 NNAPI never reaches the TPU – not worth its compile time
         }
-        if (LiteRtModel.available(modelsDir, id)) { add(Backend.LITERT_GPU); add(Backend.LITERT_GPU_ACC32); add(Backend.LITERT_GPU_FP32) }
+        if (LiteRtModel.available(modelsDir, id)) { add(Backend.LITERT_GPU_ACC32); add(Backend.LITERT_GPU); add(Backend.LITERT_GPU_FP32) }
     }
 
     /** The model file a backend runs (INT8 runs the calibrated QDQ twin, LiteRT the .tflite twin). */
@@ -279,6 +281,19 @@ class TuningStore(context: Context) {
     }
 
     fun reset() { resultsFile.delete(); inProgressFile.delete() }
+
+    /** Forget results for [ids] only (a quick re-tune keeps every other model's results). */
+    fun resetModels(ids: Set<String>) {
+        val keep = trials().filterNot { it.model in ids }
+        inProgressFile.delete()
+        if (keep.isEmpty()) resultsFile.delete() else save(keep, false)
+    }
+
+    private val scopeFile = File(dir, "scope")
+    /** Models the running tuning pass covers (null = everything installed). Survives tuner-process restarts. */
+    var scope: Set<String>?
+        get() = runCatching { scopeFile.readText().split(',').filter { it.isNotBlank() }.toSet() }.getOrNull()?.takeIf { it.isNotEmpty() }
+        set(v) { if (v == null) scopeFile.delete() else scopeFile.writeText(v.joinToString(",")) }
 
     /** Marker written right before a risky trial; if it still exists on the next start, that trial crashed the process. */
     fun markInProgress(model: String, backend: Backend) = inProgressFile.writeText("$model|${backend.name}")

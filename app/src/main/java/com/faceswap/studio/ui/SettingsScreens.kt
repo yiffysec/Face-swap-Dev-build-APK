@@ -206,10 +206,13 @@ private fun PerformanceSettings(vm: AppViewModel) {
         val tunedState by vm.tuned.collectAsState()
         val tuned = tunedState.first
         Button(onClick = { if (vm.beginTuning(fresh = true)) launchTuner() }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
-            Icon(Icons.Default.Tune, null); Spacer(Modifier.size(8.dp)); Text(if (tuned) "Re-run device tuning" else "Tune for this device")
+            Icon(Icons.Default.Tune, null); Spacer(Modifier.size(8.dp)); Text("Tune models in use (${vm.modelsInUse().size})")
+        }
+        OutlinedButton(onClick = { if (vm.beginTuning(fresh = true, all = true)) launchTuner() }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            Text("Tune all installed models (slow)")
         }
         Note(if (tuned) "Auto uses the fastest backend verified on a real face for each model." + (if (!tunedState.second) " Last run was incomplete." else "")
-        else "Not tuned yet – Auto runs every model on CPU until you tune (5–15 minutes; NPU/GPU compilation is the slow part).")
+        else "Not tuned yet – Auto runs every model on CPU until you tune. Tuning the models in use takes a few minutes; re-run it after switching swapper or enhancer.")
     }
 
     SectionTitle("Backend")
