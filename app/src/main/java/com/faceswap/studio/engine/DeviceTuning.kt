@@ -7,6 +7,7 @@ import ai.onnxruntime.OrtSession
 import ai.onnxruntime.providers.NNAPIFlags
 import android.content.Context
 import android.os.Build
+import android.system.Os
 import android.util.Log
 import com.faceswap.core.InferenceModel
 import com.faceswap.core.OrtModel
@@ -82,13 +83,31 @@ object QnnPlugin {
     fun devices(context: Context): List<OrtEpDevice> {
         val env = OrtEnvironment.getEnvironment()
         if (registered == null) registered = runCatching {
-            val lib = File(context.applicationInfo.nativeLibraryDir, LIB)
+            val libDir = context.applicationInfo.nativeLibraryDir
+            val lib = File(libDir, LIB)
             check(lib.exists()) { "QNN plugin not packaged" }
+            setDspLibraryPath(libDir)
             env.registerExecutionProviderLibrary("QNN", lib.absolutePath)
             true
         }.onFailure { Log.i("QnnPlugin", "QNN plugin unavailable: ${it.message}") }.getOrDefault(false)
         if (registered != true) return emptyList()
         return runCatching { env.epDevices.filter { it.epName.contains("QNN", ignoreCase = true) } }.getOrDefault(emptyList())
+    }
+
+    /**
+     * The HTP stub (CPU side) asks FastRPC to load libQnnHtpV*Skel.so onto the Hexagon DSP. The DSP loader only
+     * searches ADSP_LIBRARY_PATH plus a few vendor dirs – never the APK's lib dir – so without this the skel bundled
+     * with the app is never found, the backend can't validate any op and QNN silently takes zero nodes (every strict
+     * load fails, "partial" NPU runs at CPU speed). Must be set before the backend is first loaded, in every process.
+     */
+    private fun setDspLibraryPath(libDir: String) {
+        val defaults = listOf("/vendor/lib/rfsa/adsp", "/vendor/dsp/cdsp", "/vendor/dsp", "/vendor/lib64/rfs/dsp/snap",
+            "/vendor/lib/rfs/dsp", "/system/lib/rfsa/adsp", "/system/vendor/lib/rfsa/adsp", "/dsp")
+        val existing = System.getenv("ADSP_LIBRARY_PATH").orEmpty().split(';').filter { it.isNotBlank() }
+        val path = (listOf(libDir) + existing + defaults).distinct().joinToString(";")
+        runCatching { Os.setenv("ADSP_LIBRARY_PATH", path, true) }
+            .onSuccess { Log.i("QnnPlugin", "ADSP_LIBRARY_PATH=$path") }
+            .onFailure { Log.w("QnnPlugin", "could not set ADSP_LIBRARY_PATH", it) }
     }
 
     fun available(context: Context) = devices(context).isNotEmpty()
@@ -250,8 +269,13 @@ data class Trial(val model: String, val backend: Backend, val status: String, va
 
 /** Persisted tuning state, shared by the main process and the isolated `:tuner` process via files. */
 class TuningStore(context: Context) {
+    companion object { const val SCHEMA = 2 }
     private val dir = File(context.filesDir, "tuning").apply { mkdirs() }
-    private val resultsFile = File(dir, "results.json")
+    private val resultsFile = File(dir, "results.json").also { f ->
+        // Results from older builds are discarded: v2.0.0 recorded every NPU trial as failed/partial because the DSP
+        // couldn't load its skel library (no ADSP_LIBRARY_PATH), and quick tune would otherwise keep reusing those.
+        if (f.exists() && runCatching { JSONObject(f.readText()).optInt("schema") }.getOrDefault(0) < SCHEMA) f.delete()
+    }
     private val inProgressFile = File(dir, "in_progress")
 
     val device = "${Build.MANUFACTURER} ${Build.MODEL} (${socModel()})"
@@ -275,7 +299,7 @@ class TuningStore(context: Context) {
     fun save(trials: List<Trial>, complete: Boolean) {
         val best = JSONObject()
         trials.filter { it.ok }.groupBy { it.model }.forEach { (m, ts) -> best.put(m, ts.minBy { it.avgMs }.backend.name) }
-        val o = JSONObject().put("device", device).put("complete", complete).put("best", best)
+        val o = JSONObject().put("schema", SCHEMA).put("device", device).put("complete", complete).put("best", best)
             .put("trials", JSONArray(trials.map { it.toJson() }))
         val tmp = File(dir, "results.tmp"); tmp.writeText(o.toString(2)); tmp.renameTo(resultsFile)
     }

@@ -164,7 +164,7 @@ class TunerActivity : ComponentActivity() {
                 }
                 store.clearInProgress()
                 val (firstMs, avgMs, out) = t.getOrElse { e ->
-                    val tr = Trial(model, backend, "failed: ${(e.message ?: e.javaClass.simpleName).lines().first().take(90)}", 0, Double.MAX_VALUE, 0.0)
+                    val tr = Trial(model, backend, "failed: ${(e.message ?: e.javaClass.simpleName).lines().first().take(160)}", 0, Double.MAX_VALUE, 0.0)
                     trials.removeAll { it.model == model && it.backend == backend }; trials += tr
                     store.save(trials, false); ui { rows += describe(tr) }
                     continue
