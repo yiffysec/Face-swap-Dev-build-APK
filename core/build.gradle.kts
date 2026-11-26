@@ -22,7 +22,7 @@ tasks.test {
     useJUnit()
     systemProperty("models.dir", System.getProperty("models.dir") ?: (System.getenv("FACESWAP_MODELS") ?: ""))
     // calibration capture for tools/quantize_qnn.py (CI): -Dcalib.dir=… [-Dcalib.samples=48 -Dcalib.mb=96]
-    for (k in listOf("calib.dir", "calib.samples", "calib.mb")) System.getProperty(k)?.let { systemProperty(k, it) }
+    for (k in listOf("calib.dir", "calib.samples", "calib.mb", "calib.skip")) System.getProperty(k)?.let { systemProperty(k, it) }
     maxHeapSize = System.getProperty("test.heap") ?: "2g"
     testLogging { showStandardStreams = true; events("passed", "failed", "skipped") }
 }

@@ -63,7 +63,9 @@ class CalibrationDump {
         val heavy = setOf(ModelIds.FRAN, ModelIds.LP_GENERATOR, ModelIds.GPEN_512, ModelIds.GFPGAN, ModelIds.CODEFORMER, ModelIds.RESTOREFORMER)
         val cpu = OrtModel.cpuLoader(Runtime.getRuntime().availableProcessors())
         val budgets = ConcurrentHashMap<String, Budget>()
-        val e = FaceSwapEngine({ id -> File(dir, "$id.onnx") }, { id, f ->
+        // models left out (memory/time on small CI runners): treated as not installed
+        val skip = System.getProperty("calib.skip").orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        val e = FaceSwapEngine({ id -> File(dir, "$id.onnx").takeIf { id !in skip } }, { id, f ->
             val b = budgets.getOrPut(id) { Budget(if (id in heavy) maxSamples / 3 else maxSamples, if (id in heavy) budget * 2 else budget) }
             RecordingModel(cpu.load(f), File(out, id), b)
         }, emapCache = File(out, "emap.bin"))
@@ -103,7 +105,7 @@ class CalibrationDump {
                 if (p.hasLivePortrait) runCatching { e.process(img, listOf(FaceMapping(src)), SwapConfig(swapperId = swappers.first(), expressionRestore = 0.8f), explicitOverride = false) }
                 if (p.hasFaceEditor) runCatching { p.editFace(img, face, Processors.FaceEdit(mouthSmile = 0.6f, eyeOpen = 0.4f, lipOpen = 0.3f, headYaw = 0.1f)) }
             }
-            if (vi % 8 == 7) e.unloadAll() // keep peak memory bounded on CI runners
+            if (vi % 4 == 3) e.unloadAll() // keep peak memory bounded on CI runners
         }
         e.close()
         val summary = out.listFiles()?.filter { it.isDirectory }?.associate { it.name to (it.listFiles()?.size ?: 0) }
