@@ -34,12 +34,12 @@ from onnxruntime.quantization.execution_providers.qnn import get_qnn_qdq_config,
 ort.set_default_logger_severity(3)
 
 # YuNet is excluded: 230 KB, already sub-millisecond, and its sigmoid score heads don't survive int8.
-DEFAULT_IDS = [
-    "hyperswap_1a_256", "hyperswap_1b_256", "hyperswap_1c_256", "inswapper_128_fp16",
-    "gpen_bfr_256", "gpen_bfr_512", "gfpgan_1.4", "restoreformer_plus_plus", "codeformer",
-    "arcface_w600k_r50", "bisenet_resnet_18", "hrffa", "scrfd_2.5g",
-    "modnet", "u2netp", "real_esrgan_x2_fp16", "real_esrgan_x4_fp16", "span_kendata_x4", "real_esrgan_general_x4v3",
-    "fran", "live_portrait_motion_extractor", "live_portrait_feature_extractor", "live_portrait_generator",
+DEFAULT_IDS = [  # small → large, so a watchdog kill on a big model never costs the cheap wins
+    "span_kendata_x4", "real_esrgan_general_x4v3", "hrffa", "bisenet_resnet_18", "scrfd_2.5g", "u2netp", "modnet",
+    "arcface_w600k_r50", "real_esrgan_x2_fp16", "real_esrgan_x4_fp16", "gpen_bfr_256", "inswapper_128_fp16",
+    "hyperswap_1a_256", "hyperswap_1b_256", "hyperswap_1c_256",
+    "gpen_bfr_512", "gfpgan_1.4", "restoreformer_plus_plus", "codeformer", "fran",
+    "live_portrait_motion_extractor", "live_portrait_feature_extractor", "live_portrait_generator",
 ]
 VERSION = 2
 MIN_COS = 0.998
@@ -294,13 +294,53 @@ def main():
             files = sorted(f for f in os.listdir(d) if f.endswith(".bin"))
             if files:
                 shutil.copy(os.path.join(d, files[-1]), os.path.join(models_dir, mid + ".sample.bin"))
+    if os.environ.get("QNN_CHILD") == "1":  # worker: one model, report via stdout
+        for mid in ids:
+            try:
+                quantize_one(models_dir, calib_dir, mid, report)
+            except Exception as e:
+                report(mid, f"error: {first_line(e)}")
+        return
+    # Parent: each model in its own process under a memory/time watchdog – one big model must not take the whole
+    # (7 GB) CI runner down with it. Results accumulate in qnn-report.txt (merged with earlier runs).
+    import subprocess
+    import psutil
+    max_rss = int(float(os.environ.get("QUANT_MAX_GB", "5.5")) * (1 << 30))
+    max_s = int(os.environ.get("QUANT_MAX_MIN", "25")) * 60
     for mid in ids:
-        try:
-            quantize_one(models_dir, calib_dir, mid, report)
-        except Exception as e:
-            report(mid, f"error: {first_line(e)}")
-    with open(os.path.join(models_dir, "qnn-report.txt"), "w") as f:
-        f.write("\n".join(lines) + "\n")
+        env = dict(os.environ, QNN_CHILD="1")
+        p = subprocess.Popen([sys.executable, "-u", os.path.abspath(__file__), models_dir, calib_dir, mid], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        t0 = time.time(); killed = None; out = []
+        import threading
+        th = threading.Thread(target=lambda: out.extend(l.rstrip() for l in p.stdout), daemon=True); th.start()
+        while p.poll() is None:
+            time.sleep(2)
+            try:
+                pr = psutil.Process(p.pid); rss = pr.memory_info().rss
+            except psutil.Error:
+                continue
+            if rss > max_rss or time.time() - t0 > max_s:
+                killed = f"skipped: {'memory' if rss > max_rss else 'time'} limit"; p.kill(); p.wait(); break
+        th.join(5)
+        got = [l for l in out if l.startswith(mid)]
+        if killed or not got:
+            report(mid, killed or f"worker exited {p.returncode}")
+        else:
+            for l in got:
+                print(l, flush=True); lines.append(l)
+    path = os.path.join(models_dir, "qnn-report.txt")
+    old = {}
+    if os.path.exists(path):
+        for l in open(path):
+            if l.strip():
+                old[l.split()[0]] = l.rstrip()
+    for l in lines:
+        mid = l.split()[0]
+        if not (" cached " in f" {l} " and mid in old):
+            old[mid] = l
+    with open(path, "w") as f:
+        f.write("\n".join(old.values()) + "\n")
 
 
 if __name__ == "__main__":
