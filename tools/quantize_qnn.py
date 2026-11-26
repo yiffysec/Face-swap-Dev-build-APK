@@ -41,7 +41,7 @@ DEFAULT_IDS = [  # small → large, so a watchdog kill on a big model never cost
     "gpen_bfr_512", "gfpgan_1.4", "restoreformer_plus_plus", "codeformer", "fran",
     "live_portrait_motion_extractor", "live_portrait_feature_extractor", "live_portrait_generator",
 ]
-VERSION = 2
+VERSION = 3
 MIN_COS = 0.998
 MIN_PSNR = 40.0
 HELD_OUT = 3
@@ -203,7 +203,8 @@ def quantize_one(models_dir, calib_dir, mid, report):
             pass
     samples = [read_tensors(os.path.join(cdir, f)) for f in files]
     calib, held = samples[:-HELD_OUT], samples[-HELD_OUT:]
-    stride = min(4, len(calib))
+    # big graphs keep all intermediate activations of a calibration batch in RAM: smaller batches for them
+    stride = min(1 if os.path.getsize(src) > 150_000_000 else 4, len(calib))
     calib = calib[: len(calib) // stride * stride]  # strided min/max needs a multiple of the stride
     # tuner sample: one real held-out input
     shutil.copy(os.path.join(cdir, files[-1]), os.path.join(models_dir, mid + ".sample.bin"))
@@ -229,9 +230,11 @@ def quantize_one(models_dir, calib_dir, mid, report):
         names = [i.name for i in onnx.load(pre, load_external_data=False).graph.input]
         exclude = dynamic_resize_producers(pre)
         so = ort.SessionOptions(); so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-        ref = ort.InferenceSession(fp32, providers=["CPUExecutionProvider"])
+        so.enable_cpu_mem_arena = False
+        ref = ort.InferenceSession(fp32, so, providers=["CPUExecutionProvider"])
         ref_inputs = {i.name for i in ref.get_inputs()}
         ref_out = [ref.run(None, {k: v for k, v in s_.items() if k in ref_inputs}) for s_ in held]
+        del ref  # free the fp32 session before calibration
 
         def attempt(extra_exclude, tag):
             qdq = os.path.join(tmp, f"qdq_{tag}.onnx")
@@ -248,6 +251,7 @@ def quantize_one(models_dir, calib_dir, mid, report):
                     err = e
             if err is not None:
                 return None, f"quantize-failed: {first_line(err)}"
+            import gc; gc.collect()
             q = ort.InferenceSession(qdq, so, providers=["CPUExecutionProvider"])
             wc, wp = 1.0, 99.0
             for s_, ro in zip(held, ref_out):
@@ -259,6 +263,7 @@ def quantize_one(models_dir, calib_dir, mid, report):
                     wc = min(wc, cosine(a, b_))
                     if is_image(a):
                         wp = min(wp, psnr(a, b_))
+            del q
             return (qdq if wc >= MIN_COS and wp >= MIN_PSNR else None), f"{tag} cos={wc:.5f} psnr={wp:.1f}dB"
 
         good, result = attempt([], "w8a16")
@@ -320,10 +325,12 @@ def main():
                 pr = psutil.Process(p.pid); rss = pr.memory_info().rss
             except psutil.Error:
                 continue
+            peak = max(locals().get("peak", 0), rss)
             if rss > max_rss or time.time() - t0 > max_s:
                 killed = f"skipped: {'memory' if rss > max_rss else 'time'} limit"; p.kill(); p.wait(); break
         th.join(5)
         got = [l for l in out if l.startswith(mid)]
+        print(f"  [{mid}: peak {locals().get('peak', 0) / 2**30:.1f} GB]", flush=True)
         if killed or not got:
             report(mid, killed or f"worker exited {p.returncode}")
         else:

@@ -153,7 +153,7 @@ jobs:
           ./gradlew --stop >/dev/null 2>&1 || true; pkill -f GradleDaemon || true; pkill -f KotlinCompileDaemon || true
           free -g
           if [ -d $CALIB_DIR ]; then
-            TMPDIR=/mnt/work QUANT_MAX_GB=9 python3 -u tools/quantize_qnn.py $MODELS_CACHE $CALIB_DIR 2>&1 | grep -vE "W:onnx|WARNING|^\s*$" || true
+            TMPDIR=/mnt/work QUANT_MAX_GB=6.2 python3 -u tools/quantize_qnn.py $MODELS_CACHE $CALIB_DIR 2>&1 | grep --line-buffered -vE "W:onnx|WARNING|^\s*$" || true
             [ -f $MODELS_CACHE/.calib-stamp.pending ] && mv $MODELS_CACHE/.calib-stamp.pending $MODELS_CACHE/.calib-stamp
           fi
           cp $MODELS_CACHE/qnn-report.txt . 2>/dev/null || true
