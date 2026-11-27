@@ -112,10 +112,21 @@ dependencies {
 
 // ---------------------------------------------------------------------------------------------
 // Model bundling: downloads models once into ~/.cache (or MODELS_CACHE) and packs them into the APK.
-//   -PbundleModels=false   skip bundling (app downloads / imports models instead)
-//   -PmodelSet=full        bundle every model (very large APK)
+//
+// Defaults to NOT bundling. The app's primary design point is Remote processing mode (see
+// RemoteClient.kt/server/) – a server with real GPUs does the inference, so a thin APK with zero local
+// model weights is the normal build, not a special case. Baking ~0.85 GB (core) to 3+ GB (full) of ONNX
+// weights into every build by default worked against that: a build meant to be used against a server was
+// shipping the exact on-device weights the server exists to replace. On-device (Local) processing mode still
+// works the same as before either way – it just downloads models on demand (or imports them from storage,
+// see ModelManager.importFromUris) instead of finding them already unpacked from APK assets. Pass
+// -PbundleModels=true for an offline-capable build (sideloading onto a device with no server and no reliable
+// internet for on-demand downloads).
+//
+//   -PbundleModels=true    bundle models into the APK (offline-capable build; default is false)
+//   -PmodelSet=full        when bundling, bundle every model instead of just "core" (very large APK)
 // ---------------------------------------------------------------------------------------------
-val bundleModels = (project.findProperty("bundleModels") as String?)?.toBoolean() ?: true
+val bundleModels = (project.findProperty("bundleModels") as String?)?.toBoolean() ?: false
 // "core" (default, ~0.85 GB) or "full" (everything; >3 GB, only for sideloading on devices with lots of storage)
 val modelSet = (project.findProperty("modelSet") as String?) ?: "core"
 fun ff(release: String, id: String) = "https://huggingface.co/facefusion/models-$release/resolve/main/$id"
