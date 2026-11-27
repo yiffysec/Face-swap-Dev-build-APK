@@ -18,6 +18,9 @@ import com.faceswap.studio.data.AppSettings
 import com.faceswap.studio.data.LibraryFace
 import com.faceswap.studio.data.ModelCatalog
 import com.faceswap.studio.data.ModelSpec
+import com.faceswap.studio.data.ProcessingMode
+import com.faceswap.studio.engine.ServerEndpoint
+import com.faceswap.studio.engine.ServerStatus
 import com.faceswap.studio.internal.InternalTesting
 import com.faceswap.studio.util.Bitmaps
 import com.faceswap.studio.util.Diagnostics
@@ -26,8 +29,11 @@ import com.faceswap.studio.video.VideoSwapper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -132,6 +138,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun modelTitle(id: String) = ModelCatalog.byId(id)?.title ?: id
     fun swapperLabel(id: String) = modelTitle(id).removeSuffix(" 128")
 
+    // ---------------------------------------------------------------- processing mode (local device / remote server)
+    val remote = a.remote
+    val serverStatus: StateFlow<ServerStatus> = remote.status
+
+    /** True if model [id] can actually be used right now, on whichever backend the current settings select. */
+    fun modelAvailable(id: String): Boolean = if (settings.value.processingMode == ProcessingMode.REMOTE) remote.has(id) else models.has(id)
+
+    /** Reactive form of "are the models this app needs to swap a face available" – drives the Root.kt gate screen. */
+    val readyToSwap: StateFlow<Boolean> = combine(settings, models.states, remote.status) { s, _, _ ->
+        if (s.processingMode == ProcessingMode.REMOTE) remote.requiredReady else models.requiredReady
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, models.requiredReady)
+
+    /** Non-reactive snapshot for one-off checks (e.g. inside a button's onClick). */
+    val processingReady: Boolean get() = if (settings.value.processingMode == ProcessingMode.REMOTE) remote.requiredReady else models.requiredReady
+
+    fun connectToServer() {
+        if (jobRunning()) { toast("Finish or cancel the running job first"); return }
+        val s = settings.value
+        launch {
+            a.engine.release()
+            remote.connect(ServerEndpoint(s.serverHost.trim(), s.serverPort, s.serverUseTls, s.serverApiKey.trim()))
+        }
+    }
+
+    fun disconnectServer() = launch { a.engine.release(); remote.disconnect() }
+
     /** Short status for the header chip: backend mode + whether tuning ran (state – reading tuning results hits disk). */
     private val _engineStatus by lazy { MutableStateFlow(computeEngineStatus()) }
     val engineStatus: StateFlow<String> get() = _engineStatus
@@ -231,7 +263,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         s.enhancerFor(true)?.let { ids += it }
         if (s.expressionRestore > 0f) ids += listOf(com.faceswap.core.ModelIds.LP_FEATURE, com.faceswap.core.ModelIds.LP_MOTION, com.faceswap.core.ModelIds.LP_GENERATOR)
         if (liveAvailable()) ids += listOf(com.faceswap.core.ModelIds.MFS_RUNTIME, com.faceswap.core.ModelIds.MFS_BUILDER, com.faceswap.core.ModelIds.MFS_ARCFACE)
-        return ids.filter { models.has(it) }.toSet()
+        return ids.filter { modelAvailable(it) }.toSet()
     }
 
     /** [all] = every installed model (slow); otherwise only the models in use, keeping other results. */
@@ -577,7 +609,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var liveJob: Job? = null
     private var liveActive = false
 
-    fun liveAvailable() = models.has(com.faceswap.core.ModelIds.MFS_RUNTIME) && models.has(com.faceswap.core.ModelIds.MFS_BUILDER) && models.has(com.faceswap.core.ModelIds.MFS_ARCFACE)
+    /**
+     * Camera live preview needs a per-frame model call fast enough for ~15-30 fps – only realistic on-device.
+     * Over a network, even a fast server, round-trip latency per frame makes it unusable, so live preview stays
+     * local-only; photo and video swaps (one request per job, not per frame) work the same in both modes.
+     */
+    fun liveAvailable() = settings.value.processingMode == ProcessingMode.LOCAL &&
+        models.has(com.faceswap.core.ModelIds.MFS_RUNTIME) && models.has(com.faceswap.core.ModelIds.MFS_BUILDER) && models.has(com.faceswap.core.ModelIds.MFS_ARCFACE)
 
     /** Camera screen visible: sustained NPU clocks for the duration. */
     fun startLiveSession() { if (!liveActive) { liveActive = true; a.perf.beginJob(useRoot = false); a.engine.pin() } }

@@ -89,8 +89,8 @@ fun PhotoScreen(vm: AppViewModel, adders: FaceAdders, nav: Navigator) {
         Segmented(QualityPreset.entries.map { it to it.label }, settings.preset) { p -> vm.updateSettings { it.copy(preset = p) } }
         Note(settings.preset.hint + " · " + vm.swapperLabel(settings.swapperId) + (settings.enhancerFor(false)?.let { " · " + vm.modelTitle(it) } ?: ""))
         val enh = settings.enhancerFor(false)
-        if (enh != null && !vm.models.has(enh)) Note("${vm.modelTitle(enh)} isn't installed – results won't be enhanced.", color = MaterialTheme.colorScheme.error)
-        if (!vm.models.has(settings.swapperId)) Note("${vm.modelTitle(settings.swapperId)} isn't installed – pick another swapper in Settings → Swapping.", color = MaterialTheme.colorScheme.error)
+        if (enh != null && !vm.modelAvailable(enh)) Note("${vm.modelTitle(enh)} isn't available – results won't be enhanced.", color = MaterialTheme.colorScheme.error)
+        if (!vm.modelAvailable(settings.swapperId)) Note("${vm.modelTitle(settings.swapperId)} isn't available – pick another swapper in Settings → Swapping.", color = MaterialTheme.colorScheme.error)
 
         Spacer(Modifier.height(16.dp))
         Button(

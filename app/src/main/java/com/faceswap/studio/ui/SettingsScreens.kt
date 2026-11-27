@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Masks
 import androidx.compose.material.icons.filled.Speed
@@ -51,8 +52,10 @@ import com.faceswap.core.ModelIds
 import com.faceswap.studio.BuildConfig
 import com.faceswap.studio.data.Accelerator
 import com.faceswap.studio.data.AppSettings
+import com.faceswap.studio.data.ProcessingMode
 import com.faceswap.studio.data.QualityPreset
 import com.faceswap.studio.engine.CpuInfo
+import com.faceswap.studio.engine.ServerStatus
 import com.faceswap.studio.engine.TunerActivity
 import com.faceswap.studio.ui.theme.Good
 import com.faceswap.studio.ui.theme.Warn
@@ -64,6 +67,7 @@ fun SettingsRoot(vm: AppViewModel, page: SettingsPage, onPage: (SettingsPage) ->
         SettingsPage.SWAP -> SubPage("Swapping", { onPage(SettingsPage.HUB) }) { SwapSettings(vm) }
         SettingsPage.MASKS -> SubPage("Masks & blending", { onPage(SettingsPage.HUB) }) { MaskSettings(vm) }
         SettingsPage.PERFORMANCE -> SubPage("Performance", { onPage(SettingsPage.HUB) }) { PerformanceSettings(vm) }
+        SettingsPage.SERVER -> SubPage("Processing", { onPage(SettingsPage.HUB) }) { ServerSettings(vm) }
         SettingsPage.MODELS -> ModelsScreen(vm, gate = false, onBack = { onPage(SettingsPage.HUB) })
         SettingsPage.DIAGNOSTICS -> SubPage("Diagnostics & testing", { onPage(SettingsPage.HUB) }) { DiagnosticsSettings(vm) }
     }
@@ -89,14 +93,22 @@ private fun SettingsHub(vm: AppViewModel, onPage: (SettingsPage) -> Unit) {
     Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp)) {
         ScreenHeader("Settings", "FaceSwap Studio ${BuildConfig.VERSION_NAME}")
         Panel(padding = 6.dp) {
+            val serverStatus by vm.serverStatus.collectAsState()
+            NavRow(Icons.Default.Dns, "Processing", processingSubtitle(s.processingMode, serverStatus)) { onPage(SettingsPage.SERVER) }
             NavRow(Icons.Default.AutoFixHigh, "Swapping", "${s.preset.label} · ${vm.swapperLabel(s.swapperId)} · enhancer ${s.enhancerFor(false)?.let(vm::modelTitle) ?: "off"}") { onPage(SettingsPage.SWAP) }
             NavRow(Icons.Default.Masks, "Masks & blending", s.maskTypes.joinToString { it.name.lowercase() } + " · feather ${"%.2f".format(s.maskBlur)}") { onPage(SettingsPage.MASKS) }
-            val engineStatus by vm.engineStatus.collectAsState()
-            NavRow(Icons.Default.Speed, "Performance", engineStatus + " · ${CpuInfo.chipName}") { onPage(SettingsPage.PERFORMANCE) }
-            NavRow(Icons.Default.Download, "Models", "$installed installed · ${mb(vm.models.totalBytes)} on device") { onPage(SettingsPage.MODELS) }
+            if (s.processingMode == ProcessingMode.LOCAL) {
+                val engineStatus by vm.engineStatus.collectAsState()
+                NavRow(Icons.Default.Speed, "Performance", engineStatus + " · ${CpuInfo.chipName}") { onPage(SettingsPage.PERFORMANCE) }
+                NavRow(Icons.Default.Download, "Models", "$installed installed · ${mb(vm.models.totalBytes)} on device") { onPage(SettingsPage.MODELS) }
+            }
             NavRow(Icons.Default.BugReport, "Diagnostics & testing", if (vm.internalAvailable) "Crash reports · internal testing mode" else "Crash reports") { onPage(SettingsPage.DIAGNOSTICS) }
         }
-        Note("Everything runs offline on this phone: ONNX Runtime (CPU · XNNPACK · NNAPI · Qualcomm QNN NPU) and LiteRT GPU.", Modifier.padding(top = 14.dp))
+        Note(
+            if (s.processingMode == ProcessingMode.LOCAL) "Everything runs offline on this phone: ONNX Runtime (CPU · XNNPACK · NNAPI · Qualcomm QNN NPU) and LiteRT GPU."
+            else "Processing runs on your server – see Processing above for connection status.",
+            Modifier.padding(top = 14.dp),
+        )
     }
 }
 
@@ -117,20 +129,23 @@ private fun SwapSettings(vm: AppViewModel) {
 
     SectionTitle("Face swapper")
     Panel {
-        ChipRow(ModelIds.SWAPPERS.filter { m.has(it) }.map { it to vm.swapperLabel(it) }, { s.swapperId == it }) { id -> up { it.copy(swapperId = id) } }
-        Note("HyperSwap 1a/1b/1c: 256 px with its own face mask. InSwapper: 128 px, strongest likeness – pair it with High/Ultra pixel boost.")
+        ChipRow(ModelIds.SWAPPERS.filter { vm.modelAvailable(it) }.map { it to vm.swapperLabel(it) }, { s.swapperId == it }) { id -> up { it.copy(swapperId = id) } }
+        Note(
+            if (s.processingMode == com.faceswap.studio.data.ProcessingMode.REMOTE) "HyperSwap 1a/1b/1c: 256 px with its own face mask. InSwapper isn't offered over a remote server."
+            else "HyperSwap 1a/1b/1c: 256 px with its own face mask. InSwapper: 128 px, strongest likeness – pair it with High/Ultra pixel boost.",
+        )
     }
 
     SectionTitle("Face enhancer")
     Panel {
-        ChipRow(listOf("auto" to "Auto (GPEN-256)", "none" to "Off") + ModelIds.ENHANCERS.filter { m.has(it) }.map { it to vm.modelTitle(it) }, { s.enhancer == it }) { id -> up { it.copy(enhancer = id) } }
+        ChipRow(listOf("auto" to "Auto (GPEN-256)", "none" to "Off") + ModelIds.ENHANCERS.filter { vm.modelAvailable(it) }.map { it to vm.modelTitle(it) }, { s.enhancer == it }) { id -> up { it.copy(enhancer = id) } }
         SliderRow("Blend", s.enhanceBlend, 0f..1f) { v -> up { it.copy(enhanceBlend = v) } }
         if (s.enhancer == ModelIds.CODEFORMER) SliderRow("CodeFormer fidelity", s.codeformerFidelity, 0f..1f) { v -> up { it.copy(codeformerFidelity = v) } }
     }
 
     SectionTitle("Expression restorer")
     Panel {
-        if (m.has(ModelIds.LP_GENERATOR) && m.has(ModelIds.LP_MOTION) && m.has(ModelIds.LP_FEATURE)) {
+        if (vm.modelAvailable(ModelIds.LP_GENERATOR) && vm.modelAvailable(ModelIds.LP_MOTION) && vm.modelAvailable(ModelIds.LP_FEATURE)) {
             SliderRow("Restore target expression", s.expressionRestore, 0f..1f) { v -> up { it.copy(expressionRestore = v) } }
             Note("LivePortrait re-applies the target's mouth and eyes after swapping. 0 = off.")
         } else Note("Install the LivePortrait models (Models → Studio tools) to restore the target's original expression after swapping.")
@@ -138,7 +153,7 @@ private fun SwapSettings(vm: AppViewModel) {
 
     SectionTitle("Detection")
     Panel {
-        ChipRow(listOf(ModelIds.YUNET to "YuNet (fast)", ModelIds.SCRFD to "SCRFD").filter { m.has(it.first) }, { s.detectorId == it }) { id -> up { it.copy(detectorId = id) } }
+        ChipRow(listOf(ModelIds.YUNET to "YuNet (fast)", ModelIds.SCRFD to "SCRFD").filter { vm.modelAvailable(it.first) }, { s.detectorId == it }) { id -> up { it.copy(detectorId = id) } }
         Spacer(Modifier.height(6.dp))
         ToggleRow("68-point landmarks", s.landmarks68, "HRFFA refines alignment – sharper, steadier swaps") { v -> up { it.copy(landmarks68 = v) } }
         SliderRow("Per-face match tolerance", s.referenceThreshold, 0.2f..0.6f) { v -> up { it.copy(referenceThreshold = v) } }
@@ -275,3 +290,13 @@ private fun DiagnosticsSettings(vm: AppViewModel) {
 }
 
 internal fun mb(b: Long) = if (b >= 1_000_000_000) "%.2f GB".format(b / 1e9) else if (b >= 1_000_000) "%.0f MB".format(b / 1e6) else "%.0f KB".format(b / 1e3)
+
+private fun processingSubtitle(mode: ProcessingMode, status: ServerStatus): String = when (mode) {
+    ProcessingMode.LOCAL -> "On this device"
+    ProcessingMode.REMOTE -> "Remote server · " + when (status) {
+        is ServerStatus.Connected -> "connected (${status.info.models.size} models)"
+        is ServerStatus.Connecting -> "connecting…"
+        is ServerStatus.Failed -> "not connected"
+        is ServerStatus.Disconnected -> "not connected"
+    }
+}

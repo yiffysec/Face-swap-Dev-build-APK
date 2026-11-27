@@ -68,7 +68,7 @@ enum class Tab(val label: String, val icon: ImageVector) {
 }
 
 /** Sub-pages of the Settings tab. */
-enum class SettingsPage { HUB, SWAP, MASKS, PERFORMANCE, MODELS, DIAGNOSTICS }
+enum class SettingsPage { HUB, SWAP, MASKS, PERFORMANCE, SERVER, MODELS, DIAGNOSTICS }
 
 /** Launchers shared by every screen that can add faces to the library. */
 class FaceAdders(val gallery: () -> Unit, val camera: () -> Unit)
@@ -76,11 +76,14 @@ class FaceAdders(val gallery: () -> Unit, val camera: () -> Unit)
 /** Lets any screen jump to a Settings sub-page (e.g. "install models", "tune device"). */
 class Navigator(val toSettings: (SettingsPage) -> Unit)
 
+private fun notReadyMessage(mode: com.faceswap.studio.data.ProcessingMode) =
+    if (mode == com.faceswap.studio.data.ProcessingMode.REMOTE) "Connect to a server first (Settings → Processing)" else "Install the required models first"
+
 @Composable
 fun FaceSwapRoot(vm: AppViewModel) {
     val ctx = LocalContext.current
-    val states by vm.models.states.collectAsState()
-    val requiredReady = remember(states) { vm.models.requiredReady }
+    val settings by vm.settings.collectAsState()
+    val requiredReady by vm.readyToSwap.collectAsState()
     var tab by rememberSaveable { mutableStateOf(Tab.PHOTO) }
     var page by rememberSaveable { mutableStateOf(SettingsPage.HUB) }
     val nav = remember { Navigator { p -> page = p; tab = Tab.SETTINGS } }
@@ -102,11 +105,11 @@ fun FaceSwapRoot(vm: AppViewModel) {
     val adders = remember {
         FaceAdders(
             gallery = {
-                if (!vm.models.requiredReady) Toast.makeText(ctx, "Install the required models first", Toast.LENGTH_SHORT).show()
+                if (!vm.processingReady) Toast.makeText(ctx, notReadyMessage(settings.processingMode), Toast.LENGTH_SHORT).show()
                 else pickFace.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             },
             camera = {
-                if (!vm.models.requiredReady) Toast.makeText(ctx, "Install the required models first", Toast.LENGTH_SHORT).show()
+                if (!vm.processingReady) Toast.makeText(ctx, notReadyMessage(settings.processingMode), Toast.LENGTH_SHORT).show()
                 else if (androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) camera.launch(vm.newCaptureUri())
                 else cameraPerm.launch(android.Manifest.permission.CAMERA)
             },
@@ -136,7 +139,7 @@ fun FaceSwapRoot(vm: AppViewModel) {
             val gated = !requiredReady && tab != Tab.SETTINGS
             AnimatedContent(targetState = if (gated) null else tab, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "tab") { t ->
                 when (t) {
-                    null -> ModelsScreen(vm, gate = true, onBack = null)
+                    null -> if (settings.processingMode == com.faceswap.studio.data.ProcessingMode.REMOTE) ServerGateScreen(vm) else ModelsScreen(vm, gate = true, onBack = null)
                     Tab.PHOTO -> PhotoScreen(vm, adders, nav)
                     Tab.VIDEO -> VideoScreen(vm, adders, nav)
                     Tab.LIVE -> LiveScreen(vm, adders, nav)

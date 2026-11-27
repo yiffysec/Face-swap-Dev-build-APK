@@ -44,6 +44,7 @@ import com.faceswap.studio.ui.theme.Good
 @Composable
 fun ModelsScreen(vm: AppViewModel, gate: Boolean, onBack: (() -> Unit)?) {
     val states by vm.models.states.collectAsState()
+    val settings by vm.settings.collectAsState()
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { if (it.isNotEmpty()) vm.importModels(it) }
     var confirmDelete by remember { mutableStateOf<ModelSpec?>(null) }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = if (onBack != null) 8.dp else 12.dp)) {
@@ -51,6 +52,13 @@ fun ModelsScreen(vm: AppViewModel, gate: Boolean, onBack: (() -> Unit)?) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
             Text("Models", style = MaterialTheme.typography.titleLarge)
         } else ScreenHeader(if (gate) "Set up FaceSwap Studio" else "Models")
+
+        if (settings.processingMode == com.faceswap.studio.data.ProcessingMode.REMOTE) {
+            Panel {
+                Text("Remote mode is on", style = MaterialTheme.typography.titleSmall)
+                Note("Models run on your server, not this list. Manage the connection in Settings → Processing. These downloads only matter if you switch back to on-device processing.")
+            }
+        }
 
         Panel {
             Text(if (gate) "One-time setup" else "Storage", style = MaterialTheme.typography.titleSmall)

@@ -1,0 +1,21 @@
+[Unit]
+Description=FaceSwap Studio inference server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+Environment=FSW_SERVER_CONFIG=__WORKDIR__/server_config.yaml
+ExecStart=__VENV__/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port __PORT__ --ssl-certfile __TLS_CERT__ --ssl-keyfile __TLS_KEY__ --workers 1
+Restart=on-failure
+RestartSec=5
+# One worker process is intentional: Dispatcher coordinates GPU concurrency in-process (see app/inference.py);
+# multiple uvicorn workers would each load their own copy of every model and fight over the same GPUs.
+LimitNOFILE=65536
+# Let CUDA/TensorRT use all GPUs on the box; narrow this if you ever want to reserve a GPU for something else.
+# Environment=CUDA_VISIBLE_DEVICES=0,1
+
+[Install]
+WantedBy=multi-user.target

@@ -6,9 +6,12 @@ import com.faceswap.core.FaceSwapEngine
 import com.faceswap.core.IdentityVerifier
 import com.faceswap.core.InferenceModel
 import com.faceswap.core.NoIdentityVerifier
+import com.faceswap.core.RemoteInferenceModel
+import com.faceswap.core.RemoteTransport
 import com.faceswap.studio.data.Accelerator
 import com.faceswap.studio.data.AppSettings
 import com.faceswap.studio.data.ModelManager
+import com.faceswap.studio.data.ProcessingMode
 import com.faceswap.studio.util.Diagnostics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -16,11 +19,25 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** Lazily builds (and rebuilds on backend change) the face swap engine. */
-class EngineHolder(private val context: Context, private val models: ModelManager, private val tuning: TuningStore) {
+/** Everything that distinguishes one built [FaceSwapEngine] from another – a change in any field forces a rebuild. */
+private data class EngineKey(
+    val mode: ProcessingMode,
+    val accelerator: Accelerator,
+    val threads: Int,
+    val tuningVersion: Long,
+    val remote: Triple<String, Int, Boolean>?,
+)
+
+/** Lazily builds (and rebuilds on backend / server change) the face swap engine. */
+class EngineHolder(
+    private val context: Context,
+    private val models: ModelManager,
+    private val tuning: TuningStore,
+    private val remote: RemoteCatalog,
+) {
     private val mutex = Mutex()
     private var engine: FaceSwapEngine? = null
-    private var builtWith: Triple<Accelerator, Int, Long>? = null
+    private var builtWith: EngineKey? = null
 
     /** Production identity verification provider plugs in here (Persona / Onfido / Veriff wrapper). */
     var verifier: IdentityVerifier = NoIdentityVerifier
@@ -42,22 +59,47 @@ class EngineHolder(private val context: Context, private val models: ModelManage
 
     suspend fun get(settings: AppSettings): FaceSwapEngine = mutex.withLock {
         withContext(Dispatchers.Default) {
-            val key = Triple(settings.accelerator, settings.threads, tuning.version)
+            val remoteKey = if (settings.processingMode == ProcessingMode.REMOTE)
+                Triple(settings.serverHost, settings.serverPort, settings.serverUseTls) else null
+            val key = EngineKey(settings.processingMode, settings.accelerator, settings.threads, tuning.version, remoteKey)
             engine?.let { if (builtWith == key || pins.get() > 0) return@withContext it }
             engine?.close(); engine = null; loadedBackends.clear()
-            check(models.requiredReady) { "Required models are not downloaded yet" }
-            Diagnostics.crumb("engine: building (${settings.accelerator}, ${settings.threads} threads)")
-            val tuned = tuning.best()
-            val e = FaceSwapEngine(
-                resolve = { id -> models.file(id).takeIf { it.exists() } },
-                loader = { id, file -> load(id, file, settings, tuned) },
-                verifier = verifier,
-                emapCache = models.emapCache,
-            )
+            val e = if (settings.processingMode == ProcessingMode.REMOTE) buildRemoteEngine() else buildLocalEngine(settings)
             e.policy.internalLiveCaptureMode = internalLiveCaptureMode
             engine = e; builtWith = key
             e
         }
+    }
+
+    private fun buildLocalEngine(settings: AppSettings): FaceSwapEngine {
+        check(models.requiredReady) { "Required models are not downloaded yet" }
+        Diagnostics.crumb("engine: building (${settings.accelerator}, ${settings.threads} threads)")
+        val tuned = tuning.best()
+        return FaceSwapEngine(
+            resolve = { id -> models.file(id).takeIf { it.exists() } },
+            loader = { id, file -> load(id, file, settings, tuned) },
+            verifier = verifier,
+            emapCache = models.emapCache,
+        )
+    }
+
+    private fun buildRemoteEngine(): FaceSwapEngine {
+        check(remote.requiredReady) { "Not connected to a server with the required models – check Settings → Processing" }
+        val endpoint = remote.currentEndpoint() ?: throw IllegalStateException("Not connected to a server")
+        Diagnostics.crumb("engine: building (remote, ${endpoint.host}:${endpoint.port})")
+        val transport = RemoteTransport { id, inputs ->
+            (remote.currentClient() ?: throw IllegalStateException("Not connected to a server")).infer(id, inputs)
+        }
+        return FaceSwapEngine(
+            resolve = { id -> remote.markerFile(id) },
+            loader = { id, _ -> buildRemoteModel(id, transport) },
+            verifier = verifier,
+        )
+    }
+
+    private fun buildRemoteModel(id: String, transport: RemoteTransport): InferenceModel {
+        val m = remote.manifest(id) ?: throw IllegalStateException("Server did not advertise model $id")
+        return RemoteInferenceModel(id, m.inputs, m.outputs, transport = transport).also { loadedBackends[id] = "Remote server" }
     }
 
     private fun load(id: String, file: File, settings: AppSettings, tuned: Map<String, Backend>): InferenceModel {

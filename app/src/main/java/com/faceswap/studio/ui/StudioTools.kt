@@ -48,7 +48,8 @@ private enum class Tool(val label: String) { EDIT("Face editor"), AGE("Age"), BA
 fun StudioTools(vm: AppViewModel, nav: Navigator) {
     val st by vm.photo.collectAsState()
     if (st.target == null) return
-    val m = vm.models
+    // dual-mode availability: on-device file presence locally, server manifest remotely (see AppViewModel.modelAvailable)
+    val m = object { fun has(id: String) = vm.modelAvailable(id) }
     var tool by remember { mutableStateOf(Tool.EDIT) }
     val ctx = LocalContext.current
     val pickBg = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->

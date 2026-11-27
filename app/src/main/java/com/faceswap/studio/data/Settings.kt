@@ -13,6 +13,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 
+/** Where model inference actually runs. */
+enum class ProcessingMode(val label: String, val hint: String) {
+    LOCAL("On this device", "Every model runs on this phone (CPU / XNNPACK / NNAPI / QNN / GPU)"),
+    REMOTE("Remote server", "Images are sent to your own server, which hosts every model and does all processing"),
+}
+
 enum class Accelerator(val label: String, val hint: String) {
     AUTO("Auto (tuned)", "Fastest verified backend per model"),
     CPU("CPU", "Always works, slowest"),
@@ -31,6 +37,13 @@ enum class QualityPreset(val label: String, val boost: Int, val enhance: Boolean
 }
 
 data class AppSettings(
+    val processingMode: ProcessingMode = ProcessingMode.LOCAL,
+    /** Hostname or IP of the remote inference server (no scheme, e.g. "192.168.1.50" or "faceswap.example.com"). */
+    val serverHost: String = "",
+    val serverPort: Int = 8443,
+    val serverUseTls: Boolean = true,
+    /** Sent as "Authorization: Bearer <key>" if non-blank. Matches the key the setup script generated on the server. */
+    val serverApiKey: String = "",
     val preset: QualityPreset = QualityPreset.BALANCED,
     val swapperId: String = ModelIds.HYPERSWAP_1A,
     val detectorId: String = ModelIds.YUNET,
@@ -115,6 +128,11 @@ class SettingsStore(context: Context) {
         fun <T> set(k: String, v: Set<T>, parse: (String) -> T?): Set<T> =
             j.optJSONArray(k)?.let { a -> (0 until a.length()).mapNotNull { runCatching { parse(a.getString(it)) }.getOrNull() }.toSet() } ?: v
         return AppSettings(
+            processingMode = enumOr(s("processingMode", d.processingMode.name), d.processingMode),
+            serverHost = s("serverHost", d.serverHost),
+            serverPort = i("serverPort", d.serverPort),
+            serverUseTls = b("serverUseTls", d.serverUseTls),
+            serverApiKey = s("serverApiKey", d.serverApiKey),
             preset = enumOr(s("preset", d.preset.name), d.preset),
             swapperId = s("swapperId", d.swapperId),
             detectorId = s("detectorId", d.detectorId),
@@ -153,6 +171,8 @@ class SettingsStore(context: Context) {
     fun update(transform: (AppSettings) -> AppSettings) {
         val s = transform(_settings.value)
         val j = JSONObject()
+            .put("processingMode", s.processingMode.name).put("serverHost", s.serverHost).put("serverPort", s.serverPort)
+            .put("serverUseTls", s.serverUseTls).put("serverApiKey", s.serverApiKey)
             .put("preset", s.preset.name).put("swapperId", s.swapperId).put("detectorId", s.detectorId).put("enhancer", s.enhancer)
             .put("selector", s.selector.name).put("landmarks68", s.landmarks68)
             .put("maskTypes", org.json.JSONArray(s.maskTypes.map { it.name })).put("maskRegions", org.json.JSONArray(s.maskRegions.map { it.name }))

@@ -1,0 +1,15 @@
+# Inference service
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+numpy>=1.26,<3.0
+PyYAML>=6.0,<7.0
+requests>=2.31,<3.0
+
+# onnxruntime-gpu is intentionally NOT pinned here: setup_server.sh picks the exact wheel (and CUDA/cuDNN build)
+# that matches the detected driver + CUDA toolkit version, and TensorRT support requires the GPU-and-TensorRT
+# flavor rather than the plain CPU wheel. Installing a mismatched wheel by hand is the most common way to end up
+# with a server that silently falls back to CPU. See setup/plan.py + setup_server.sh.
+
+# Hardware detection (setup/ only, not the running server)
+pynvml>=11.5,<12.0
+psutil>=5.9,<7.0

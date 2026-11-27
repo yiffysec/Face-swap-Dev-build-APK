@@ -1,0 +1,31 @@
+# Example server_config.yaml, hand-written. Normally you don't write this yourself — run ./setup_server.sh and it
+# detects your hardware and generates this file via setup/plan.py. This example is here as a reference for the
+# shape of the file and for folks who want to configure a box by hand instead.
+
+host: 0.0.0.0
+port: 8443
+tls_cert: tls/server.crt
+tls_key: tls/server.key
+api_key: change-me-to-a-long-random-string
+models_dir: models
+manifest_path: models_manifest.yaml
+# "core" = required + recommended models only (matches the Android app's default bundle). "full" = every
+# remotely-servable model in models_manifest.yaml. You can also list ids directly, e.g. "hyperswap_1a_256,gpen_bfr_256".
+model_set: core
+trt_cache_dir: trt_cache
+log_level: info
+
+devices:
+  # One entry per GPU. index: -1 means CPU-only fallback (no GPU present).
+  - index: 0
+    name: NVIDIA A100-SXM4-80GB
+    tier: ampere_datacenter
+    vram_mb: 81920
+    use_tensorrt: true
+    trt_fp16: true
+    trt_int8: false
+    trt_int8_calibration_cache: null
+    trt_workspace_mb: 16384
+    gpu_mem_limit_mb: 69632
+    arena_extend_strategy: kNextPowerOfTwo
+    concurrency: 8

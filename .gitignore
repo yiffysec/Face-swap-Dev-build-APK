@@ -8,3 +8,13 @@ local.properties
 captures/
 *.onnx
 *.apk
+
+# Server: generated at setup time, never checked in (contains API keys / private keys / local hardware specifics)
+server/.venv/
+server/models/
+server/server_config.yaml
+server/tls/
+server/trt_cache/
+server/*.part
+__pycache__/
+*.pyc

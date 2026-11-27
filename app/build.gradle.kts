@@ -106,6 +106,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
     implementation("androidx.exifinterface:exifinterface:1.4.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    // Remote processing mode: talks to server/ (see RemoteClient.kt) over plain HTTP(S) with a custom binary body.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
 
 // ---------------------------------------------------------------------------------------------

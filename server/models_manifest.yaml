@@ -1,0 +1,332 @@
+# Model catalog, mirroring the Android app's ModelCatalog in
+# app/src/main/java/com/faceswap/studio/data/ModelManager.kt — same ids, same source URLs, same groups. Keep the
+# two in sync: a client and a server built from the same commit must always agree on what a model id means.
+#
+# group: required | recommended | swappers | enhancers | studio | live  (matches ModelGroup in Settings.kt)
+# role: detector | recognizer | swapper | enhancer | analyser | parser | landmarker | background | upscaler |
+#       studio | live  (server-side only; used for grouping in setup prompts and /v1/health, not for any
+#       model-specific inference logic — see app/inference.py's module docstring)
+#
+# download_models.py reads this file; so does app/catalog.py at server startup.
+
+models:
+  # --- required (core) ---
+  - id: yunet_2023_mar
+    role: detector
+    group: required
+    url: https://huggingface.co/facefusion/models-3.4.0/resolve/main/yunet_2023_mar.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.4.0/resolve/main/yunet_2023_mar.hash
+    filename: yunet_2023_mar.onnx
+    size_bytes: 232475
+    license: MIT
+    notes: Fast face detector (default)
+
+  - id: scrfd_2.5g
+    role: detector
+    group: required
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/scrfd_2.5g.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/scrfd_2.5g.hash
+    filename: scrfd_2.5g.onnx
+    size_bytes: 3295067
+    license: Non-commercial
+    notes: Alternative face detector
+
+  - id: arcface_w600k_r50
+    role: recognizer
+    group: required
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/arcface_w600k_r50.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/arcface_w600k_r50.hash
+    filename: arcface_w600k_r50.onnx
+    size_bytes: 174388474
+    license: Non-commercial
+    notes: Identity embeddings
+
+  - id: hyperswap_1a_256
+    role: swapper
+    group: required
+    url: https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1a_256.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1a_256.hash
+    filename: hyperswap_1a_256.onnx
+    size_bytes: 402700000
+    license: ResearchRAIL
+    notes: Default face swapper - 256px, sharp, fast, built-in mask
+
+  - id: open_nsfw
+    role: analyser
+    group: required
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/open_nsfw.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/open_nsfw.hash
+    filename: open_nsfw.onnx
+    size_bytes: 23598282
+    license: BSD-2
+    notes: Target content classification for the identity policy
+
+  # --- recommended (core) ---
+  - id: hrffa
+    role: landmarker
+    group: recommended
+    url: https://huggingface.co/facefusion/models-3.9.0/resolve/main/hrffa.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.9.0/resolve/main/hrffa.hash
+    filename: hrffa.onnx
+    size_bytes: 35800000
+    license: MIT
+    notes: 68-point landmarks - better alignment, area masks, face editor
+
+  - id: bisenet_resnet_18
+    role: parser
+    group: recommended
+    url: https://huggingface.co/facefusion/models-3.1.0/resolve/main/bisenet_resnet_18.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.1.0/resolve/main/bisenet_resnet_18.hash
+    filename: bisenet_resnet_18.onnx
+    size_bytes: 53200000
+    license: MIT
+    notes: Region/occlusion masks - keeps hair, hands, glasses
+
+  - id: gpen_bfr_256
+    role: enhancer
+    group: recommended
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/gpen_bfr_256.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/gpen_bfr_256.hash
+    filename: gpen_bfr_256.onnx
+    size_bytes: 75800000
+    license: Non-commercial
+    notes: Default face enhancer - 7x faster than GFPGAN
+
+  - id: modnet
+    role: background
+    group: recommended
+    url: https://huggingface.co/facefusion/models-3.5.0/resolve/main/modnet.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.5.0/resolve/main/modnet.hash
+    filename: modnet.onnx
+    size_bytes: 25900000
+    license: Apache-2.0
+    notes: Background removal / blur / replace (portrait matting)
+
+  - id: span_kendata_x4
+    role: upscaler
+    group: recommended
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/span_kendata_x4.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/span_kendata_x4.hash
+    filename: span_kendata_x4.onnx
+    size_bytes: 1700000
+    license: Non-commercial
+    notes: Tiny, fast 4x photo upscaler
+
+  - id: real_esrgan_x2_fp16
+    role: upscaler
+    group: recommended
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/real_esrgan_x2_fp16.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/real_esrgan_x2_fp16.hash
+    filename: real_esrgan_x2_fp16.onnx
+    size_bytes: 36100000
+    license: BSD-3
+    notes: High-quality 2x upscaler
+
+  - id: real_esrgan_general_x4v3
+    role: upscaler
+    group: recommended
+    url: https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/real_esrgan_general_x4v3/releases/v0.67.0/real_esrgan_general_x4v3-onnx-float.zip
+    filename: real_esrgan_general_x4v3.onnx
+    size_bytes: 4992137
+    license: BSD-3
+    notes: >
+      Fast 4x upscaler (Qualcomm AI Hub release). Ships as a zip containing the .onnx (+ external .data weights);
+      download_models.py extracts it the same way the Android client does in ModelManager.kt:download().
+
+  # --- extra swappers ---
+  - id: inswapper_128_fp16
+    role: swapper
+    group: swappers
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/inswapper_128_fp16.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/inswapper_128_fp16.hash
+    filename: inswapper_128_fp16.onnx
+    size_bytes: 277680829
+    license: Non-commercial
+    notes: >
+      Classic swapper - strongest likeness, use with pixel boost. NOT remotely servable: the client reads this
+      model's identity-projection matrix directly out of the .onnx file (see Models.kt:InSwapper), which has no
+      network equivalent. Listed here for completeness/local setups only; catalog.is_remotely_servable() excludes
+      it from /v1/health and model_set: full.
+
+  - id: hyperswap_1b_256
+    role: swapper
+    group: swappers
+    url: https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1b_256.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1b_256.hash
+    filename: hyperswap_1b_256.onnx
+    size_bytes: 402700000
+    license: ResearchRAIL
+    notes: HyperSwap variant
+
+  - id: hyperswap_1c_256
+    role: swapper
+    group: swappers
+    url: https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1c_256.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1c_256.hash
+    filename: hyperswap_1c_256.onnx
+    size_bytes: 402700000
+    license: ResearchRAIL
+    notes: HyperSwap variant
+
+  # --- extra enhancers ---
+  - id: gfpgan_1.4
+    role: enhancer
+    group: enhancers
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.hash
+    filename: gfpgan_1.4.onnx
+    size_bytes: 340299087
+    license: Apache-2.0
+    notes: Classic 512px face restoration
+
+  - id: gpen_bfr_512
+    role: enhancer
+    group: enhancers
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/gpen_bfr_512.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/gpen_bfr_512.hash
+    filename: gpen_bfr_512.onnx
+    size_bytes: 284300000
+    license: Non-commercial
+    notes: 512px GPEN restoration
+
+  - id: restoreformer_plus_plus
+    role: enhancer
+    group: enhancers
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/restoreformer_plus_plus.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/restoreformer_plus_plus.hash
+    filename: restoreformer_plus_plus.onnx
+    size_bytes: 294300000
+    license: Apache-2.0
+    notes: Detail-rich restoration
+
+  - id: codeformer
+    role: enhancer
+    group: enhancers
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/codeformer.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/codeformer.hash
+    filename: codeformer.onnx
+    size_bytes: 377000000
+    license: S-Lab (non-commercial)
+    notes: Restoration with fidelity control
+
+  # --- studio tools ---
+  - id: fran
+    role: studio
+    group: studio
+    url: https://huggingface.co/facefusion/models-3.6.0/resolve/main/fran.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.6.0/resolve/main/fran.hash
+    filename: fran.onnx
+    size_bytes: 130800000
+    license: MIT
+    notes: Age modifier (photos)
+
+  - id: u2netp
+    role: background
+    group: studio
+    url: https://huggingface.co/facefusion/models-3.5.0/resolve/main/u2netp.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.5.0/resolve/main/u2netp.hash
+    filename: u2netp.onnx
+    size_bytes: 4600000
+    license: Apache-2.0
+    notes: Tiny background-removal fallback
+
+  - id: real_esrgan_x4_fp16
+    role: upscaler
+    group: studio
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/real_esrgan_x4_fp16.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/real_esrgan_x4_fp16.hash
+    filename: real_esrgan_x4_fp16.onnx
+    size_bytes: 36100000
+    license: BSD-3
+    notes: High-quality 4x upscaler
+
+  - id: live_portrait_feature_extractor
+    role: studio
+    group: studio
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_feature_extractor.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_feature_extractor.hash
+    filename: live_portrait_feature_extractor.onnx
+    size_bytes: 3400000
+    license: MIT
+    notes: Expression restorer / face editor
+
+  - id: live_portrait_motion_extractor
+    role: studio
+    group: studio
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_motion_extractor.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_motion_extractor.hash
+    filename: live_portrait_motion_extractor.onnx
+    size_bytes: 112600000
+    license: MIT
+    notes: Expression restorer / face editor
+
+  - id: live_portrait_generator
+    role: studio
+    group: studio
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_generator.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_generator.hash
+    filename: live_portrait_generator.onnx
+    size_bytes: 222300000
+    license: MIT
+    notes: Expression restorer / face editor
+
+  - id: live_portrait_stitcher
+    role: studio
+    group: studio
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_stitcher.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_stitcher.hash
+    filename: live_portrait_stitcher.onnx
+    size_bytes: 193300
+    license: MIT
+    notes: Face editor
+
+  - id: live_portrait_eye_retargeter
+    role: studio
+    group: studio
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_eye_retargeter.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_eye_retargeter.hash
+    filename: live_portrait_eye_retargeter.onnx
+    size_bytes: 581400
+    license: MIT
+    notes: Face editor - eye open/close
+
+  - id: live_portrait_lip_retargeter
+    role: studio
+    group: studio
+    url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_lip_retargeter.onnx
+    hash_url: https://huggingface.co/facefusion/models-3.0.0/resolve/main/live_portrait_lip_retargeter.hash
+    filename: live_portrait_lip_retargeter.onnx
+    size_bytes: 151000
+    license: MIT
+    notes: Face editor - lip open/close
+
+  # --- live preview (MobileFaceSwap) ---
+  # Scoped local-only on the Android client (see AppViewModel.liveAvailable()) because per-frame network
+  # round-trips can't keep up with a camera preview. Included here anyway so a server can still serve them if
+  # something other than the live-preview path ever wants to call them (e.g. a desktop testing tool).
+  - id: MobileFaceSwapUNetRuntime
+    role: live
+    group: live
+    url: https://huggingface.co/ZZZHHHHW/mobilefaceswap/resolve/main/MobileFaceSwapUNetRuntime.onnx
+    filename: MobileFaceSwapUNetRuntime.onnx
+    size_bytes: 364176
+    license: Apache-2.0
+    notes: Real-time camera preview swapper
+
+  - id: BuildFaceSwap
+    role: live
+    group: live
+    url: https://huggingface.co/ZZZHHHHW/mobilefaceswap/resolve/main/BuildFaceSwap.onnx
+    filename: BuildFaceSwap.onnx
+    size_bytes: 82512085
+    license: Apache-2.0
+    notes: Builds per-identity weights (once per face)
+
+  - id: mobilefaceswap_arcface
+    role: live
+    group: live
+    url: https://huggingface.co/ZZZHHHHW/mobilefaceswap/resolve/main/arcface.onnx
+    filename: mobilefaceswap_arcface.onnx
+    size_bytes: 209111421
+    license: Apache-2.0
+    notes: Identity encoder for the preview swapper
