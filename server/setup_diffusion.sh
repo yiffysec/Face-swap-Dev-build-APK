@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Sets up this box's *diffusion* swap tier — a separate, optional, heavier addition on top of a box
-# setup_server.sh has already configured. Installs torch/diffusers into their own venv (kept apart from the ONNX
-# server's onnxruntime-gpu venv — see diffusion_app/requirements.txt's header comment for why), downloads the
-# selected backends' weights, writes diffusion_config.yaml, and installs + starts a background service. The ONNX
-# server (faceswapd) transparently proxies into it — see app/main.py's /v1/diffusion/{path} route — so there's
-# nothing to change on the Cloudflare Tunnel / client-address side; the same host:port and API key the app already
-# has for the ONNX swappers now also reaches these.
+# setup_server.sh has already configured. Runs as a Docker container (see diffusion_app/Dockerfile,
+# diffusion_app/docker-compose.yml) built FROM the official pytorch/pytorch CUDA image, not a bare venv: that gets
+# torch+CUDA+cuDNN from an auditable, official source instead of resolving/compiling them on every box, and pins
+# a CUDA 12.8 build with solid support for this box's GPUs (RTX 5090 / Blackwell, compute capability sm_120) —
+# the old venv approach installed torch unpinned from the cu121 index, which could land on a pre-Blackwell build.
+# The ONNX server (faceswapd) still runs on bare metal/venv (see setup_server.sh) and transparently proxies into
+# this container — see app/main.py's /v1/diffusion/{path} route — so there's nothing to change on the Cloudflare
+# Tunnel / client-address side; the same host:port and API key the app already has for the ONNX swappers now also
+# reaches these.
 #
 # Safe to re-run — each step is idempotent. Requires setup_server.sh to have been run first (reads its api_key out
 # of server_config.yaml) unless you pass --api-key yourself.
@@ -20,7 +23,7 @@
 #                                                                 highest-numbered GPU on the box, so a single
 #                                                                 diffusion pipeline's VRAM footprint doesn't
 #                                                                 compete with the ONNX dispatcher's device 0)
-#   sudo ./setup_diffusion.sh --no-service                      # set everything up but don't install/start a service
+#   sudo ./setup_diffusion.sh --no-service                      # build + download weights but don't start the container
 #
 # The default backend set excludes reface_sd14 deliberately: its checkpoint's license is non-commercial/research
 # only (see diffusion_manifest.yaml), so it shouldn't end up running on a box just because someone ran the
@@ -36,8 +39,9 @@ BACKENDS="instantid_sdxl,pulid_sdxl"
 PORT=8444
 DEVICE=""
 API_KEY=""
-INSTALL_SERVICE=1
-VENV_DIR="$SERVER_DIR/diffusion-venv"
+START_SERVICE=1
+COMPOSE_FILE="diffusion_app/docker-compose.yml"
+ENV_FILE="diffusion_app/.env.diffusion"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -45,7 +49,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
     --api-key) API_KEY="$2"; shift 2 ;;
-    --no-service) INSTALL_SERVICE=0; shift ;;
+    --no-service) START_SERVICE=0; shift ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -53,18 +57,28 @@ done
 
 log() { echo -e "\n\033[1;36m==>\033[0m $*"; }
 
-# --- 1. System packages (build deps for dlib, if reface_sd14 is in the backend list) --------------------------
-log "Installing system packages"
-if command -v apt-get >/dev/null; then
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq python3 python3-venv python3-pip git cmake build-essential >/dev/null
-elif command -v dnf >/dev/null; then
-  dnf install -y -q python3 python3-pip git cmake gcc-c++ make >/dev/null
-else
-  echo "Unsupported distro: install python3 (with venv), pip, git, cmake and a C++ toolchain manually, then re-run." >&2
-  exit 1
+# --- 1. Docker + nvidia-container-toolkit (idempotent: each install is a no-op if already present) -------------
+log "Checking for Docker and the NVIDIA Container Toolkit"
+if ! command -v docker >/dev/null; then
+  log "Installing Docker"
+  if command -v apt-get >/dev/null; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq ca-certificates curl gnupg >/dev/null
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    . /etc/os-release
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" \
+      > /etc/apt/sources.list.d/docker.list
+    apt-get update -qq
+    apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null
+  else
+    echo "Unsupported distro for automatic Docker install — install Docker + the Docker Compose plugin manually, then re-run." >&2
+    exit 1
+  fi
 fi
+docker compose version >/dev/null 2>&1 || { echo "docker compose (the plugin, not docker-compose v1) is required — install docker-compose-plugin, then re-run." >&2; exit 1; }
 
 HAS_NVIDIA=0
 if command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then
@@ -76,52 +90,43 @@ else
   exit 1
 fi
 
+if ! docker info 2>/dev/null | grep -qi nvidia; then
+  log "Installing the NVIDIA Container Toolkit (so Docker containers can see the GPUs)"
+  if command -v apt-get >/dev/null; then
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+      > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    apt-get update -qq
+    apt-get install -y -qq nvidia-container-toolkit >/dev/null
+    nvidia-ctk runtime configure --runtime=docker
+    systemctl restart docker
+  else
+    echo "Unsupported distro for automatic NVIDIA Container Toolkit install — install it manually, then re-run." >&2
+    exit 1
+  fi
+fi
+
 if [[ -z "$DEVICE" ]]; then
   DEVICE="$(( $(nvidia-smi -L | wc -l) - 1 ))"
   log "No --device given — defaulting to GPU $DEVICE (the highest-numbered GPU on this box, to avoid competing with the ONNX dispatcher's device 0 for VRAM)"
 fi
 
-# Same reachability check as setup_server.sh uses for HAS_SUPERVISOR — see that script's comment for why
-# `supervisorctl status` alone is the wrong test.
-HAS_SYSTEMD=0
-if command -v systemctl >/dev/null && systemctl list-units >/dev/null 2>&1; then
-  HAS_SYSTEMD=1
-fi
-HAS_SUPERVISOR=0
-if command -v supervisorctl >/dev/null && [[ -d /etc/supervisor/conf.d ]] && supervisorctl pid >/dev/null 2>&1; then
-  HAS_SUPERVISOR=1
-fi
-
-# --- 2. Python environment (separate venv — see diffusion_app/requirements.txt's header comment) --------------
-log "Setting up Python virtualenv at $VENV_DIR"
-python3 -m venv "$VENV_DIR"
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
-pip install --quiet --upgrade pip
-
-log "Installing torch (CUDA 12.1 wheel) — this is the slow step on a fresh box"
-pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-log "Installing diffusion_app/requirements.txt"
-pip install --quiet -r diffusion_app/requirements.txt
-
-python3 -c "import torch; assert torch.cuda.is_available(), 'torch cannot see a CUDA device'; print('torch sees', torch.cuda.device_count(), 'CUDA device(s)')"
-
-# --- 3. API key (reuse the ONNX server's, so one key works for both) -------------------------------------------
+# --- 2. API key (reuse the ONNX server's, so one key works for both) -------------------------------------------
 if [[ -z "$API_KEY" ]]; then
   if [[ -f server_config.yaml ]]; then
-    API_KEY="$(python3 -c "import yaml; print(yaml.safe_load(open('server_config.yaml')).get('api_key') or '')")"
+    API_KEY="$(python3 -c "import yaml; print(yaml.safe_load(open('server_config.yaml')).get('api_key') or '')" 2>/dev/null || true)"
   fi
   if [[ -z "$API_KEY" ]]; then
     echo "No server_config.yaml (run setup_server.sh first) and no --api-key given — generating a new key, but" >&2
     echo "note this will NOT match the ONNX server's key, so a client would need two different keys." >&2
-    API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null || head -c32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c43)"
   else
     log "Reusing the API key from server_config.yaml"
   fi
 fi
 
-# --- 4. diffusion_config.yaml ------------------------------------------------------------------------------
+# --- 3. diffusion_config.yaml (mounted read-only into the container — see docker-compose.yml) -------------------
 log "Writing diffusion_config.yaml"
 cat > diffusion_config.yaml <<EOF
 host: 127.0.0.1
@@ -130,88 +135,57 @@ api_key: "$API_KEY"
 manifest_path: diffusion_manifest.yaml
 weights_dir: diffusion/weights
 preload: []
-device: $DEVICE
+device: 0
 log_level: info
 EOF
+# host/port here are informational only — neither diffusion_app/main.py nor the Dockerfile's CMD reads them for
+# the actual bind address (uvicorn's --host/--port CLI flags in the Dockerfile do that, baked to 0.0.0.0:8444
+# inside the container); the real loopback-only guarantee comes from docker-compose.yml's port mapping
+# ("127.0.0.1:8444:8444" on the host). device is 0 because NVIDIA_VISIBLE_DEVICES (set from $DEVICE below) is
+# what actually selects the physical GPU — inside the container it's always the only one visible, numbered 0.
+
+echo "DIFFUSION_DEVICE=$DEVICE" > "$ENV_FILE"
+
+# --- 4. Build the image --------------------------------------------------------------------------------------
+log "Building the faceswap-diffusion image (pytorch/pytorch:2.9.0-cuda12.8-cudnn9-runtime base — first build pulls that, ~6GB, then installs our requirements.txt, all prebuilt wheels now, see diffusion_app/requirements.txt)"
+docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" build
 
 # --- 5. Weights -------------------------------------------------------------------------------------------
 log "Downloading weights for: $BACKENDS — this can take a long time and a lot of disk on the first run"
 if [[ "$BACKENDS" == "all" ]]; then
-  python3 download_diffusion_weights.py --all --weights-dir diffusion/weights
+  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" run --rm diffusion-download --all
 else
   # shellcheck disable=SC2086
-  python3 download_diffusion_weights.py ${BACKENDS//,/ } --weights-dir diffusion/weights
+  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" run --rm diffusion-download ${BACKENDS//,/ }
 fi
 
-# --- 6. faceswap-diffusion service ------------------------------------------------------------------------
-if [[ "$INSTALL_SERVICE" == "1" ]] && [[ "$HAS_SYSTEMD" == "1" ]]; then
-  log "Installing systemd service faceswap-diffusion"
-  RUN_USER="${SUDO_USER:-$(whoami)}"
-  sed -e "s#__WORKDIR__#$SERVER_DIR#g" -e "s#__DIFFUSION_VENV__#$VENV_DIR#g" \
-      -e "s#__USER__#$RUN_USER#g" -e "s#__DIFFUSION_PORT__#$PORT#g" \
-      systemd/faceswap-diffusion.service.template > /etc/systemd/system/faceswap-diffusion.service
-  systemctl daemon-reload
-  systemctl enable faceswap-diffusion >/dev/null
-  systemctl restart faceswap-diffusion
-  sleep 2
-  if systemctl is-active --quiet faceswap-diffusion; then
-    log "faceswap-diffusion is running (systemd)"
+# --- 6. Start the container -------------------------------------------------------------------------------
+if [[ "$START_SERVICE" == "1" ]]; then
+  log "Starting faceswap-diffusion"
+  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d
+  sleep 3
+  if docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" ps --status running | grep -q diffusion-server; then
+    log "faceswap-diffusion is running (docker)"
   else
-    echo "faceswap-diffusion failed to start — check: journalctl -u faceswap-diffusion -n 50" >&2
-  fi
-elif [[ "$INSTALL_SERVICE" == "1" ]] && [[ "$HAS_SUPERVISOR" == "1" ]]; then
-  log "Installing supervisord program faceswap-diffusion"
-  sed -e "s#__WORKDIR__#$SERVER_DIR#g" -e "s#__DIFFUSION_VENV__#$VENV_DIR#g" -e "s#__DIFFUSION_PORT__#$PORT#g" \
-      supervisor/faceswap-diffusion.conf.template > /etc/supervisor/conf.d/faceswap-diffusion.conf
-  supervisorctl reread >/dev/null
-  supervisorctl update >/dev/null
-  supervisorctl restart faceswap-diffusion >/dev/null 2>&1 || true
-  sleep 2
-  if supervisorctl status faceswap-diffusion 2>/dev/null | grep -q RUNNING; then
-    log "faceswap-diffusion is running (supervisord)"
-  else
-    echo "faceswap-diffusion failed to start — check: tail -50 logs/faceswap-diffusion.err.log" >&2
-  fi
-elif [[ "$INSTALL_SERVICE" == "1" ]]; then
-  log "No systemd or supervisord — starting faceswap-diffusion as a plain background process"
-  cat > start_diffusion.sh <<EOF
-#!/usr/bin/env bash
-cd "$SERVER_DIR"
-source "$VENV_DIR/bin/activate"
-export FSW_DIFFUSION_CONFIG="$SERVER_DIR/diffusion_config.yaml"
-exec python -m uvicorn diffusion_app.main:app --host 127.0.0.1 --port $PORT --workers 1
-EOF
-  chmod +x start_diffusion.sh
-  if [[ -f diffusion.pid ]] && kill -0 "$(cat diffusion.pid)" 2>/dev/null; then
-    log "faceswap-diffusion already running (pid $(cat diffusion.pid)) — leaving it alone"
-  else
-    nohup ./start_diffusion.sh > logs/faceswap-diffusion.out.log 2> logs/faceswap-diffusion.err.log &
-    echo $! > diffusion.pid
-    sleep 2
-    if kill -0 "$(cat diffusion.pid)" 2>/dev/null; then
-      log "faceswap-diffusion is running (pid $(cat diffusion.pid), plain background process)"
-    else
-      echo "faceswap-diffusion failed to start — check: tail -50 logs/faceswap-diffusion.err.log" >&2
-    fi
+    echo "faceswap-diffusion failed to start — check: docker compose -f $COMPOSE_FILE --env-file $ENV_FILE logs" >&2
   fi
 else
-  log "Skipping service install (--no-service). Start manually with:"
-  echo "  source $VENV_DIR/bin/activate && cd $SERVER_DIR && FSW_DIFFUSION_CONFIG=$SERVER_DIR/diffusion_config.yaml uvicorn diffusion_app.main:app --host 127.0.0.1 --port $PORT"
+  log "Skipping container start (--no-service). Start manually with:"
+  echo "  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE up -d"
 fi
 
 cat <<EOF
 
 ================================================================================
- Diffusion swap tier is set up: $BACKENDS on GPU $DEVICE.
+ Diffusion swap tier is set up: $BACKENDS on GPU $DEVICE (container).
 
  It's reached through the SAME address and API key as the ONNX server (faceswapd proxies /v1/diffusion/* into
- this process — see app/main.py). Nothing to reconfigure in the app or the Cloudflare Tunnel.
+ this container — see app/main.py). Nothing to reconfigure in the app or the Cloudflare Tunnel.
 
  First request to each backend id will be slow (loading a multi-GB pipeline onto the GPU); check
  GET /v1/diffusion/health to see which ids are currently loaded.
 
  Config file: $SERVER_DIR/diffusion_config.yaml
- Logs:        logs/faceswap-diffusion.out.log, logs/faceswap-diffusion.err.log
-              (or journalctl -u faceswap-diffusion -f on a systemd host)
+ Logs:        docker compose -f $COMPOSE_FILE --env-file $ENV_FILE logs -f
 ================================================================================
 EOF
