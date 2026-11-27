@@ -35,7 +35,27 @@ class ModelNotFoundError(Exception):
 
 
 class ModelSession:
-    """One ONNX model loaded once on one device. Thread-safe: ORT's `Run` may be called concurrently."""
+    """
+    One ONNX model loaded once on one device. Thread-safe: ORT's `Run` (and `run_with_iobinding`) may be called
+    concurrently on the same session.
+
+    Two execution paths:
+      - IO Binding (always, when the device is a GPU): binds inputs/outputs as device-resident OrtValues instead
+        of letting `session.run()` do its own implicit host<->device staging, which saves a copy on every call.
+        This is the one safe to always turn on — it's a stable, broadly-supported API with no shape constraints.
+      - CUDA Graph replay (opt-in via `device.cuda_graph` in server_config.yaml, default off): captures the whole
+        kernel-launch sequence once and replays it on every subsequent call, which matters a lot for small/fast
+        graphs like these face models where kernel-launch overhead is a real fraction of total latency. This is
+        genuinely fragile: it requires every input shape to be static (no dynamic axes) and the same device
+        memory addresses reused call to call, which conflicts with this server's "any model, any shape" design
+        for anything whose input size varies per request (a detector running on a full-resolution image, an
+        upscaler at an arbitrary resolution). So it's attempted only when the model's own ONNX graph declares
+        fully static input shapes, and a one-time trial capture at load time must succeed, or it's silently
+        disabled for that session with a log line — never a crash, and never silently wrong output. This path
+        has NOT been validated on real GPU hardware as part of this change (built in an environment with no
+        CUDA device); treat it as experimental until you've confirmed it helps on your own box, and turn it off
+        per-device in server_config.yaml (`cuda_graph: false`) if a model misbehaves.
+    """
 
     def __init__(self, entry: ModelEntry, model_path: Path, device: DeviceConfig, providers: List[tuple]):
         self.id = entry.id
@@ -48,17 +68,108 @@ class ModelSession:
         self.input_names = [i.name for i in self._session.get_inputs()]
         self.output_names = [o.name for o in self._session.get_outputs()]
         self._input_types = {i.name: _ORT_TO_NUMPY.get(i.type, np.float32) for i in self._session.get_inputs()}
-        log.info("loaded %s on device %s (%s) in %.1fs [%s]", entry.id, device.index, device.name,
-                  __import__("time").monotonic() - t0, self._session.get_providers()[0])
+
+        self._is_gpu = device.index >= 0
+        self._ort_device_type = "cuda" if self._is_gpu else "cpu"
+        self._ort_device_id = device.index if self._is_gpu else 0
+
+        self._graph_lock = threading.Lock()
+        self._graph_ready = False  # becomes True only after a successful trial capture
+        self._graph_input_shapes: Dict[str, tuple] = {}
+        self._bound_inputs: Dict[str, "ort.OrtValue"] = {}
+        self._bound_outputs: Dict[str, "ort.OrtValue"] = {}
+        self._io_binding: "ort.IOBinding | None" = None
+
+        want_graph = self._is_gpu and device.cuda_graph
+        static_shapes = self._static_input_shapes() if want_graph else None
+        if want_graph and static_shapes is not None:
+            try:
+                self._try_capture_graph(static_shapes)
+                self._graph_ready = True
+            except Exception as e:  # noqa: BLE001 - any failure here just means "no graph replay", not an error
+                log.warning("%s: CUDA graph capture skipped (%s) - falling back to normal IO-bound run", entry.id, e)
+        elif want_graph:
+            log.info("%s: has dynamic input shapes - CUDA graph replay doesn't apply, using IO-bound run", entry.id)
+
+        log.info("loaded %s on device %s (%s) in %.1fs [%s]%s", entry.id, device.index, device.name,
+                  __import__("time").monotonic() - t0, self._session.get_providers()[0],
+                  " [cuda-graph]" if self._graph_ready else "")
+
+    def _static_input_shapes(self) -> "Dict[str, tuple] | None":
+        """None if any input has a dynamic (symbolic or negative) dimension; a shape map otherwise."""
+        shapes = {}
+        for i in self._session.get_inputs():
+            if any(not isinstance(d, int) or d <= 0 for d in i.shape):
+                return None
+            shapes[i.name] = tuple(i.shape)
+        return shapes
+
+    def _try_capture_graph(self, shapes: Dict[str, tuple]) -> None:
+        """
+        Prepares and performs the one capture call CUDA graph replay depends on. Two steps, both required:
+
+        1. An ordinary (non-bound) run with zero-filled dummy inputs, just to learn each output's *concrete*
+           shape. Static input shapes don't guarantee the exported graph also declares static output shapes
+           (shape inference can leave an output symbolic even when it's deterministic in practice) - running it
+           once is the only reliable way to know the real sizes.
+        2. The actual capture: every input and output bound as a persistent, fixed-address OrtValue sized from
+           step 1, then one `run_with_iobinding` call, which is what ORT's CUDA EP treats as the capture call
+           when `enable_cuda_graph` is set. Every later call reuses these same buffers (see `update_inplace` in
+           `_run_captured`) so the replay stays valid.
+        """
+        dummy_feeds = {n: np.zeros(shapes[n], dtype=self._input_types.get(n, np.float32)) for n in self.input_names}
+        dummy_outputs = self._session.run(self.output_names, dummy_feeds)
+
+        io_binding = self._session.io_binding()
+        for name in self.input_names:
+            ov = ort.OrtValue.ortvalue_from_numpy(dummy_feeds[name], self._ort_device_type, self._ort_device_id)
+            self._bound_inputs[name] = ov
+            io_binding.bind_ortvalue_input(name, ov)
+        for name, sample in zip(self.output_names, dummy_outputs):
+            ov = ort.OrtValue.ortvalue_from_shape_and_type(
+                list(sample.shape), np.float32, self._ort_device_type, self._ort_device_id
+            )
+            self._bound_outputs[name] = ov
+            io_binding.bind_ortvalue_output(name, ov)
+        self._session.run_with_iobinding(io_binding)  # captures the graph on this call
+        self._graph_input_shapes = shapes
+        self._io_binding = io_binding
 
     def run(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        feeds = {}
         for name in self.input_names:
             if name not in inputs:
                 raise ValueError(f"{self.id}: missing input '{name}' (expects {self.input_names})")
-            feeds[name] = np.ascontiguousarray(inputs[name], dtype=self._input_types.get(name, np.float32))
-        outputs = self._session.run(self.output_names, feeds)
-        return {name: np.asarray(val, dtype=np.float32) for name, val in zip(self.output_names, outputs)}
+
+        if self._graph_ready:
+            shapes_match = all(
+                np.ascontiguousarray(inputs[n]).shape == self._graph_input_shapes[n] for n in self.input_names
+            )
+            if shapes_match:
+                return self._run_captured(inputs)
+            # A request with a different shape than what was captured can't replay the graph - fall through to
+            # the plain IO-bound path for this one call rather than erroring or silently using stale data.
+
+        return self._run_io_bound(inputs)
+
+    def _run_captured(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        with self._graph_lock:
+            for name in self.input_names:
+                arr = np.ascontiguousarray(inputs[name], dtype=self._input_types.get(name, np.float32))
+                self._bound_inputs[name].update_inplace(arr)  # same device buffer -> graph replay stays valid
+            self._session.run_with_iobinding(self._io_binding)
+            return {name: self._bound_outputs[name].numpy().astype(np.float32) for name in self.output_names}
+
+    def _run_io_bound(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        io_binding = self._session.io_binding()
+        for name in self.input_names:
+            arr = np.ascontiguousarray(inputs[name], dtype=self._input_types.get(name, np.float32))
+            io_binding.bind_cpu_input(name, arr) if not self._is_gpu else io_binding.bind_ortvalue_input(
+                name, ort.OrtValue.ortvalue_from_numpy(arr, self._ort_device_type, self._ort_device_id)
+            )
+        for name in self.output_names:
+            io_binding.bind_output(name, self._ort_device_type, device_id=self._ort_device_id)
+        self._session.run_with_iobinding(io_binding)
+        return {name: val.astype(np.float32) for name, val in zip(self.output_names, io_binding.copy_outputs_to_cpu())}
 
 
 def build_providers(device: DeviceConfig, trt_cache_dir: str) -> List[tuple]:
@@ -87,7 +198,10 @@ def build_providers(device: DeviceConfig, trt_cache_dir: str) -> List[tuple]:
         "device_id": device.index,
         "gpu_mem_limit": device.gpu_mem_limit_mb * 1024 * 1024,
         "arena_extend_strategy": device.arena_extend_strategy,
-        "cudnn_conv_algo_search": "EXHAUSTIVE" if device.tier in ("hopper", "ampere_datacenter", "ada_datacenter") else "HEURISTIC",
+        "cudnn_conv_algo_search": "EXHAUSTIVE" if device.tier in (
+            "hopper", "ampere_datacenter", "ada_datacenter",
+            "blackwell_datacenter", "blackwell_workstation", "blackwell_consumer",
+        ) else "HEURISTIC",
         "do_copy_in_default_stream": True,
     }))
     providers.append(("CPUExecutionProvider", {}))

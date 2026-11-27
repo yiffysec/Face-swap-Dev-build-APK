@@ -29,3 +29,8 @@ devices:
     gpu_mem_limit_mb: 69632
     arena_extend_strategy: kNextPowerOfTwo
     concurrency: 8
+    # Experimental, off by default: CUDA Graph replay for models with fully static input shapes (most of the
+    # face-crop models qualify; a detector running on a full-resolution image doesn't). Can meaningfully cut
+    # per-call latency for small/fast models by skipping repeat kernel-launch overhead, at the cost of being a
+    # genuinely fragile ORT feature - see app/inference.py's ModelSession docstring before turning this on.
+    cuda_graph: false

@@ -83,6 +83,30 @@ fp8 Transformer Engine support isn't something ONNX Runtime's execution provider
 either; Hopper gets the same fp16 TensorRT path as other datacenter tiers, just with more workspace. Nothing in
 this server claims speedups it doesn't deliver.
 
+## Acceleration
+
+Three layers, all automatic except the last:
+
+- **TensorRT engine caching** (datacenter/workstation/Blackwell-consumer tiers — see `setup/plan.py`'s
+  `TIER_DEFAULTS`): the TensorRT execution provider compiles each model's graph into a fused, fp16 engine on first
+  load and caches it under `trt_cache/dev<N>/`, so only the very first request after a model or driver upgrade pays
+  the compile cost. Consumer-but-capable tiers (`blackwell_consumer` — RTX 50-series) get this too, unlike older
+  `ada_consumer`/`ampere_consumer` cards, since a dedicated always-on server box is exactly the case where the
+  longer first-load cost is worth it.
+- **IO Binding** (always on, every call, GPU or CPU): `ModelSession` binds every input/output as a device-resident
+  `OrtValue` and calls `run_with_iobinding()` instead of plain `session.run()`. This skips an implicit host↔device
+  staging copy that `session.run()` does on every call — a small, stable, broadly-supported ORT API with no shape
+  constraints, so it's never gated behind a config flag.
+- **CUDA Graph replay** (experimental, opt-in per device via `cuda_graph: true` in `server_config.yaml`, default
+  `false`): captures the full kernel-launch sequence once and replays it on every later call, which matters for
+  small/fast graphs — most of the face-crop models — where kernel-launch overhead is a real fraction of total
+  latency. Only applies to a model whose ONNX graph has fully static input shapes (a detector running on a
+  full-resolution image doesn't qualify; a 128×128 face-crop swapper does); a one-time trial capture at load time
+  either succeeds or the model silently falls back to the plain IO-bound path with a log line — never a crash,
+  never stale output. This has **not been validated on real GPU hardware** as part of this change (built and
+  logic-tested in an environment with no CUDA device) — treat it as experimental until you've confirmed it actually
+  helps on your own box, and flip it back to `false` per-device if a model misbehaves.
+
 ## Architecture
 
 One FastAPI process, one `InferenceSession` per (model, device) pair, created lazily on first use (except the

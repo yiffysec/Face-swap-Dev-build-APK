@@ -30,6 +30,12 @@ from app.config import DeviceConfig, ServerConfig, save_config  # noqa: E402
 # alone, since TensorRT's cold engine-build cost usually isn't worth it on a card that's memory- or
 # thermal-constrained anyway (shared workstations, laptops, older cards).
 TIER_DEFAULTS: Dict[str, dict] = {
+    "blackwell_datacenter": dict(datacenter_grade=True, trt_fp16=True,  workspace_frac=0.25, mem_frac=0.85, arena="kNextPowerOfTwo", per_replica_gb=1.5),  # B100/B200/B300/GB200/GB300
+    "blackwell_workstation": dict(datacenter_grade=True, trt_fp16=True, workspace_frac=0.20, mem_frac=0.85, arena="kNextPowerOfTwo", per_replica_gb=1.4),  # RTX Pro 6000 Blackwell
+    # RTX 50-series desktop (e.g. RTX 5090): still a serious compute card at this cc - unlike the older consumer
+    # tiers below, it earns TensorRT + EXHAUSTIVE conv search (see inference.py's build_providers) since it's the
+    # tier a dedicated always-on multi-GPU server box is actually likely to use. No ECC/MIG, GeForce EULA applies.
+    "blackwell_consumer": dict(datacenter_grade=True, trt_fp16=True, workspace_frac=0.15, mem_frac=0.80, arena="kNextPowerOfTwo", per_replica_gb=1.3),
     "hopper":             dict(datacenter_grade=True,  trt_fp16=True,  workspace_frac=0.25, mem_frac=0.85, arena="kNextPowerOfTwo", per_replica_gb=1.5),
     "ampere_datacenter":  dict(datacenter_grade=True,  trt_fp16=True,  workspace_frac=0.20, mem_frac=0.85, arena="kNextPowerOfTwo", per_replica_gb=1.5),
     "ada_datacenter":     dict(datacenter_grade=True,  trt_fp16=True,  workspace_frac=0.20, mem_frac=0.85, arena="kNextPowerOfTwo", per_replica_gb=1.4),

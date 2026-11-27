@@ -59,6 +59,7 @@ class HostInfo:
 _DATACENTER_NAME_HINTS = (
     "l40", "l4", "a100", "a40", "a30", "a16", "a10", "a2 ", "h100", "h200", "h800", "a800",
     "rtx a6000", "rtx a5000", "rtx a4000", "rtx 6000 ada", "rtx 5000 ada", "rtx 4000 ada",
+    "rtx pro 6000", "rtx 6000 blackwell", "b100", "b200", "b300", "gb200", "gb300",
     "v100", "t4", "p100", "p40", "p4 ", "tesla",
 )
 _CONSUMER_NAME_HINTS = ("geforce", "rtx 20", "rtx 30", "rtx 40", "rtx 50", "gtx")
@@ -76,6 +77,14 @@ def _name_suggests_datacenter(name: str) -> Optional[bool]:
 def classify_tier(name: str, vram_mb: int, cc_major: int, cc_minor: int) -> str:
     cc = (cc_major, cc_minor)
     dc_hint = _name_suggests_datacenter(name)
+
+    if cc_major == 12:  # Blackwell consumer/workstation: RTX 50-series desktop, RTX Pro 6000 Blackwell workstation
+        if dc_hint is True or vram_mb >= 60_000:
+            return "blackwell_workstation"  # RTX Pro 6000 Blackwell (96GB) and similar
+        return "blackwell_consumer"  # RTX 5090/5080/etc - fp8 native, no ECC/MIG, GeForce EULA applies
+
+    if cc_major == 10:  # Blackwell datacenter: B100/B200/B300/GB200/GB300 - always a datacenter SKU at this cc
+        return "blackwell_datacenter"
 
     if cc_major >= 9:
         return "hopper"  # H100/H200/GH200-class: fp8 Transformer Engine, the fastest tier we plan for
@@ -160,6 +169,8 @@ def detect_gpus_via_pynvml() -> Optional[List[GpuInfo]]:
 # consumer chip named in this project's target hardware plus common others. Unlisted names fall back to VRAM-only
 # tiering in classify_tier (dc_hint stays None), which is the documented, honest fallback rather than a guess.
 _CC_BY_NAME_PATTERN = [
+    (r"\bb100\b|\bb200\b|\bb300\b|\bgb200\b|\bgb300\b", (10, 0)),
+    (r"\brtx 50\d\d\b|\brtx pro 6000\b|\brtx 6000 blackwell\b", (12, 0)),
     (r"\bh100\b|\bh200\b|\bh800\b|\bgh200\b", (9, 0)),
     (r"\bl40s?\b|\brtx 40\d\d\b|\bl4\b|\brtx 6000 ada\b|\brtx 5000 ada\b|\brtx 4000 ada\b", (8, 9)),
     (r"\ba40\b|\ba16\b|\ba10\b|\ba6000\b|\brtx a6000\b|\brtx a5000\b|\brtx a4000\b|\brtx 30\d\d\b", (8, 6)),

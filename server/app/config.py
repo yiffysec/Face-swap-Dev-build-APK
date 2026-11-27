@@ -30,6 +30,10 @@ class DeviceConfig:
     gpu_mem_limit_mb: int
     arena_extend_strategy: str  # kNextPowerOfTwo | kSameAsRequested
     concurrency: int  # max in-flight infer() calls this device accepts at once (our stand-in for "replicas")
+    # Experimental, opt-in only (never auto-enabled by plan.py): attempt CUDA graph replay for models with fully
+    # static input shapes, on this device. See app/inference.py's ModelSession docstring for what this actually
+    # does and why it's gated so carefully - it's a real speedup where it applies but a genuinely fragile ORT
+    # feature, and hasn't been validated against real GPU hardware as part of this project.
     cuda_graph: bool = False
 
 
