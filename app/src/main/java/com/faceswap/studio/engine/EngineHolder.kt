@@ -94,6 +94,10 @@ class EngineHolder(
             resolve = { id -> remote.markerFile(id) },
             loader = { id, _ -> buildRemoteModel(id, transport) },
             verifier = verifier,
+            diffusionSwapper = { id ->
+                val c = remote.currentClient() ?: throw IllegalStateException("Not connected to a server")
+                DiffusionRemoteSwapModel(id, c).also { loadedBackends[id] = "Remote server (diffusion)" }
+            },
         )
     }
 

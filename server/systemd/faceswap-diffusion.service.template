@@ -1,0 +1,20 @@
+[Unit]
+Description=FaceSwap Studio diffusion inference server
+After=network.target faceswapd.service
+# Not `Wants=faceswapd.service`: this process doesn't depend on faceswapd being up to do its own job (it just
+# happens to be reached *through* faceswapd's proxy route in normal operation) — only ordered after it so restarts
+# of the pair during a deploy land in a sensible order.
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+Environment=FSW_DIFFUSION_CONFIG=__WORKDIR__/diffusion_config.yaml
+ExecStart=__DIFFUSION_VENV__/bin/python -m uvicorn diffusion_app.main:app --host 127.0.0.1 --port __DIFFUSION_PORT__ --workers 1
+Restart=on-failure
+RestartSec=5
+# One worker process is intentional, same reasoning as faceswapd.service.template.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

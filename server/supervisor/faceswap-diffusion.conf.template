@@ -1,0 +1,18 @@
+; supervisord program definition for the diffusion server (diffusion_app/) — same pattern as faceswapd.conf.template
+; but loopback-only and plain HTTP: it's never reached directly, only proxied into by faceswapd's own
+; /v1/diffusion/{path} route (see app/main.py), so it needs neither TLS nor an externally-reachable port.
+[program:faceswap-diffusion]
+directory=__WORKDIR__
+command=__DIFFUSION_VENV__/bin/python -m uvicorn diffusion_app.main:app --host 127.0.0.1 --port __DIFFUSION_PORT__ --workers 1
+environment=FSW_DIFFUSION_CONFIG="__WORKDIR__/diffusion_config.yaml"
+autostart=true
+autorestart=true
+startretries=10
+stopsignal=TERM
+stdout_logfile=__WORKDIR__/logs/faceswap-diffusion.out.log
+stderr_logfile=__WORKDIR__/logs/faceswap-diffusion.err.log
+stdout_logfile_maxbytes=10MB
+stderr_logfile_maxbytes=10MB
+; One worker process is intentional, same reasoning as faceswapd: BackendManager coordinates GPU residency
+; in-process (see diffusion_app/backends/__init__.py) — a second worker would load its own multi-GB copy of
+; every pipeline it touches and fight the first worker for the same GPU.

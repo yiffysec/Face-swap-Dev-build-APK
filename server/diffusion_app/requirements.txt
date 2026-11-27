@@ -1,0 +1,28 @@
+# Installed into its own venv (diffusion-venv/, see setup_diffusion.sh) — deliberately separate from the ONNX
+# server's requirements.txt/venv, since torch and onnxruntime-gpu pin overlapping-but-different CUDA runtime
+# wheels and mixing them in one environment is a common source of silent GPU-fallback or import-time breakage.
+
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+PyYAML>=6.0,<7.0
+pydantic>=2.0,<3.0
+Pillow>=10.0,<12.0
+numpy>=1.26,<3.0
+opencv-python-headless>=4.9,<5.0
+huggingface_hub>=0.24,<1.0
+
+# torch/torchvision are intentionally NOT pinned here, same reasoning as onnxruntime-gpu in the ONNX server's
+# requirements.txt: setup_diffusion.sh installs the cu12x wheel matching the detected driver, from
+# download.pytorch.org's own index rather than PyPI, so pinning a version here would just get overridden anyway.
+
+diffusers>=0.30,<1.0
+transformers>=4.40,<5.0
+accelerate>=0.30,<2.0
+safetensors>=0.4,<1.0
+insightface>=0.7,<1.0           # instantid_sdxl: face detection + embedding (antelopev2)
+controlnet_aux>=0.0.7           # instantid_sdxl: auxiliary ControlNet preprocessing utilities
+dlib>=19.24                     # reface_sd14: face detection + 68-point landmarks (their own repo's dependency)
+omegaconf>=2.3,<3.0             # reface_sd14: REFace's ldm config loading (taming-transformers/latent-diffusion style)
+pytorch-lightning>=2.0,<3.0     # reface_sd14: their checkpoint's `ldm` package expects this at import time
+einops>=0.7,<1.0                # reface_sd14: ldm package dependency
+kornia>=0.7,<1.0                # reface_sd14: ldm package dependency

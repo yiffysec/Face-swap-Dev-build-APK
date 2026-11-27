@@ -10,6 +10,14 @@ class SourceFace(
     val label: String,
     embeddings: List<FloatArray>,
     val provenance: SourceProvenance = SourceProvenance.GALLERY,
+    /**
+     * One representative photo of this identity (first sample passed to [FaceSwapEngine.buildSource]), kept
+     * alongside the ArcFace embeddings above. The ONNX swappers never touch this – they work purely from the
+     * averaged embedding – but a diffusion swapper (see [ModelIds.DIFFUSION_SWAPPERS]) needs an actual source
+     * image to condition on, not just a 512-float vector, since its own identity encoder (InstantID/PuLID's
+     * insightface pass, server-side) runs on real pixels. Null for a source built with no samples.
+     */
+    val referenceImage: RgbImage? = null,
 ) {
     val embeddings: List<FloatArray> = embeddings.map { Geometry.normalize(it) }
     val averaged: FloatArray = Geometry.normalize(FloatArray(512) { i -> this.embeddings.sumOf { it[i].toDouble() }.toFloat() })
@@ -60,9 +68,30 @@ object ModelIds {
     const val MFS_BUILDER = "BuildFaceSwap"
     const val MFS_ARCFACE = "mobilefaceswap_arcface"
 
-    val SWAPPERS = listOf(HYPERSWAP_1A, HYPERSWAP_1B, HYPERSWAP_1C, INSWAPPER)
+    // Diffusion-based swappers (InstantID / PuLID / REFace) – server-only, never bundled or run on-device: there is
+    // no local file these ever resolve to (see ModelManager/RemoteCatalog's `has()`), so they only ever appear in
+    // Settings when ProcessingMode.REMOTE is active and the connected server's /v1/diffusion/health lists them.
+    // See server/diffusion_manifest.yaml for what each one actually is.
+    const val INSTANTID_SDXL = "instantid_sdxl"
+    const val PULID_SDXL = "pulid_sdxl"
+    const val REFACE_SD14 = "reface_sd14"
+    val DIFFUSION_SWAPPERS = listOf(INSTANTID_SDXL, PULID_SDXL, REFACE_SD14)
+
+    val SWAPPERS = listOf(HYPERSWAP_1A, HYPERSWAP_1B, HYPERSWAP_1C, INSWAPPER) + DIFFUSION_SWAPPERS
     val ENHANCERS = listOf(GPEN_256, GFPGAN, GPEN_512, RESTOREFORMER, CODEFORMER)
     val FRAME_ENHANCERS = listOf(ESRGAN_GENERAL_X4, ESRGAN_X2, ESRGAN_X4, SPAN_X4)
+}
+
+/**
+ * A [FaceSwapModel] whose actual swap happens server-side on a whole source photo (not a per-crop embedding) –
+ * implemented by [com.faceswap.studio.engine] since it needs network access, which this module (`core`) doesn't
+ * depend on. [FaceSwapEngine.render] calls [setActiveSource] with the current source's [SourceFace.referenceImage]
+ * right before invoking [FaceSwapModel.swap] on each assignment, since that method's own signature (crop + a
+ * 512-float latent) has no room for a whole source image – this is the narrow side channel that gets it there
+ * without changing [FaceSwapModel] for every other swapper.
+ */
+interface DiffusionSourceAware {
+    fun setActiveSource(image: RgbImage?)
 }
 
 data class SwapConfig(
@@ -158,6 +187,9 @@ class FaceSwapEngine(
     private val loader: (String, File) -> InferenceModel,
     verifier: IdentityVerifier = NoIdentityVerifier,
     private val emapCache: File? = null,
+    /** Builds a [FaceSwapModel] for one of [ModelIds.DIFFUSION_SWAPPERS]; null (the local-engine default) means
+     *  those ids are simply unavailable – see [EngineHolder.buildRemoteEngine] for the remote-engine wiring. */
+    private val diffusionSwapper: ((String) -> FaceSwapModel)? = null,
 ) : Closeable {
     private val models = ConcurrentHashMap<String, Closeable>()
 
@@ -181,8 +213,12 @@ class FaceSwapEngine(
     fun landmarker(): Landmarker68? = if (has(ModelIds.HRFFA)) cached("lm68") { Landmarker68(load(ModelIds.HRFFA)) } else null
     fun parser(): FaceParser? = if (has(ModelIds.BISENET)) cached("parser") { FaceParser(load(ModelIds.BISENET)) } else null
     fun swapper(id: String): FaceSwapModel = cached("swap:$id") {
-        val f = resolve(id)?.takeIf { it.exists() } ?: throw MissingModelException(id)
-        if (id.startsWith("inswapper")) InSwapper(loader(id, f), f, emapCache) else HyperSwap(loader(id, f), f)
+        if (id in ModelIds.DIFFUSION_SWAPPERS) {
+            diffusionSwapper?.invoke(id) ?: throw MissingModelException(id)
+        } else {
+            val f = resolve(id)?.takeIf { it.exists() } ?: throw MissingModelException(id)
+            if (id.startsWith("inswapper")) InSwapper(loader(id, f), f, emapCache) else HyperSwap(loader(id, f), f)
+        }
     }
     fun restorer(id: String): FaceRestorer = cached("enh:$id") { FaceRestorer(load(id), id) }
 
@@ -237,7 +273,7 @@ class FaceSwapEngine(
     fun embed(img: RgbImage, face: Face): FloatArray = face.embedding ?: recognizer.embed(img, face).also { face.embedding = it }
 
     fun buildSource(id: String, label: String, samples: List<Pair<RgbImage, Face>>): SourceFace =
-        SourceFace(id, label, samples.map { (img, f) -> embed(img, f) })
+        SourceFace(id, label, samples.map { (img, f) -> embed(img, f) }, referenceImage = samples.firstOrNull()?.first)
 
     private fun latentFor(src: SourceFace, swapper: FaceSwapModel): FloatArray =
         src.latents.getOrPut(swapper.id) { swapper.sourceLatent(src.averaged) }
@@ -307,7 +343,10 @@ class FaceSwapEngine(
         val cfg = if (draft) config.copy(pixelBoost = 0, maskTypes = config.maskTypes - MaskType.REGION) else config
         val out = target.copy()
         val swapper = swapper(cfg.swapperId)
-        for ((face, src) in fp.assignments) timed("swap") { swapFace(out, target, face, latentFor(src, swapper), swapper, cfg) }
+        for ((face, src) in fp.assignments) timed("swap") {
+            (swapper as? DiffusionSourceAware)?.setActiveSource(src.referenceImage)
+            swapFace(out, target, face, latentFor(src, swapper), swapper, cfg)
+        }
         if (draft) return out
         if (cfg.expressionRestore > 0f && processors.hasLivePortrait) for ((face, _) in fp.assignments) timed("expression") {
             processors.restoreExpression(target, out, face, cfg.expressionRestore, cfg.expressionAreas, cfg.maskBlur)

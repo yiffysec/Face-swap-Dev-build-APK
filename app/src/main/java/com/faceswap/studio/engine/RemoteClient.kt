@@ -3,6 +3,7 @@ package com.faceswap.studio.engine
 import com.faceswap.core.Tensor
 import com.faceswap.core.TensorWire
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -19,6 +20,12 @@ import javax.net.ssl.X509TrustManager
 
 /** One model as advertised by the server's `/v1/health` manifest. */
 data class ServerModelInfo(val id: String, val role: String, val inputs: List<String>, val outputs: List<String>)
+
+/** One backend as advertised by the server's `/v1/diffusion/health` (see server/diffusion_app/main.py). */
+data class DiffusionModelInfo(val id: String, val displayName: String, val role: String, val license: String, val notes: String)
+
+/** Optional knobs for [RemoteClient.diffusionSwap] – all null = backend defaults (see server's SwapParams). */
+data class DiffusionSwapParams(val steps: Int? = null, val guidanceScale: Float? = null, val identityStrength: Float? = null, val seed: Long? = null)
 
 /** Server identity + device summary + the full model manifest, as returned by `/v1/health`. */
 data class ServerInfo(val name: String, val version: String, val device: String, val models: List<ServerModelInfo>)
@@ -64,8 +71,11 @@ private fun looksLikeSelfSignedTarget(host: String): Boolean =
 class RemoteClient(private val endpoint: ServerEndpoint) {
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(90, TimeUnit.SECONDS)
-        .writeTimeout(90, TimeUnit.SECONDS)
+        // 300s, not the old 90s: a diffusion backend's first request (see diffusionSwap) can spend a minute or
+        // more just loading a multi-GB pipeline onto the GPU before it even starts denoising; ordinary tensor
+        // infer() calls finish in well under this either way, so raising it costs them nothing.
+        .readTimeout(300, TimeUnit.SECONDS)
+        .writeTimeout(300, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .apply {
             if (endpoint.tls && looksLikeSelfSignedTarget(endpoint.host)) {
@@ -113,6 +123,51 @@ class RemoteClient(private val endpoint: ServerEndpoint) {
             if (!r.isSuccessful) throw IOException("$modelId: " + (errorMessage(r.body) ?: "server returned HTTP ${r.code}"))
             val stream = r.body?.byteStream() ?: throw IOException("$modelId: empty response from server")
             return TensorWire.readMap(stream)
+        }
+    }
+
+    /**
+     * GET /v1/diffusion/health – best-effort: returns an empty list (never throws) when the box has no diffusion
+     * tier installed at all, since that's an entirely optional add-on (see server/setup_diffusion.sh) and most of
+     * [RemoteCatalog.connect]'s callers shouldn't have to special-case "server reachable but diffusion absent"
+     * differently from "no diffusion models configured".
+     */
+    fun fetchDiffusionInfo(): List<DiffusionModelInfo> = runCatching {
+        http.newCall(req("/v1/diffusion/health").get().build()).execute().use { r ->
+            if (!r.isSuccessful) return@use emptyList()
+            val j = JSONObject(r.body?.string() ?: "{}")
+            val arr = j.optJSONArray("models") ?: JSONArray()
+            (0 until arr.length()).map { i ->
+                val m = arr.getJSONObject(i)
+                DiffusionModelInfo(
+                    id = m.getString("id"),
+                    displayName = m.optString("display_name", m.getString("id")),
+                    role = m.optString("role", "swapper"),
+                    license = m.optString("license", ""),
+                    notes = m.optString("notes", ""),
+                )
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    /**
+     * POST /v1/diffusion/swap/{modelId} – [sourcePng]/[targetPng] are whole encoded images (PNG/JPEG bytes, not
+     * tensors – see diffusion_app/main.py's module docstring for why this is a different wire shape from [infer]).
+     * Returns the swapped image's PNG bytes, already composited full-size by the server.
+     */
+    fun diffusionSwap(modelId: String, sourcePng: ByteArray, targetPng: ByteArray, params: DiffusionSwapParams = DiffusionSwapParams()): ByteArray {
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("source", "source.png", sourcePng.toRequestBody("image/png".toMediaType()))
+            .addFormDataPart("target", "target.png", targetPng.toRequestBody("image/png".toMediaType()))
+            .apply {
+                params.steps?.let { addFormDataPart("steps", it.toString()) }
+                params.guidanceScale?.let { addFormDataPart("guidance_scale", it.toString()) }
+                params.identityStrength?.let { addFormDataPart("identity_strength", it.toString()) }
+                params.seed?.let { addFormDataPart("seed", it.toString()) }
+            }.build()
+        http.newCall(req("/v1/diffusion/swap/$modelId").post(body).build()).execute().use { r ->
+            if (!r.isSuccessful) throw IOException("$modelId: " + (errorMessage(r.body) ?: "server returned HTTP ${r.code}"))
+            return r.body?.bytes() ?: throw IOException("$modelId: empty response from server")
         }
     }
 

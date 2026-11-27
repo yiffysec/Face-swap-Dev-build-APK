@@ -36,12 +36,14 @@ class RemoteCatalog(context: Context) {
     @Volatile private var client: RemoteClient? = null
     @Volatile private var connectedTo: ServerEndpoint? = null
     @Volatile private var manifests: Map<String, ServerModelInfo> = emptyMap()
+    @Volatile private var diffusionModels: Map<String, DiffusionModelInfo> = emptyMap()
 
     fun currentClient(): RemoteClient? = client
     fun currentEndpoint(): ServerEndpoint? = connectedTo
 
-    fun has(id: String): Boolean = !id.startsWith("inswapper") && manifests.containsKey(id)
+    fun has(id: String): Boolean = !id.startsWith("inswapper") && (manifests.containsKey(id) || diffusionModels.containsKey(id))
     fun manifest(id: String): ServerModelInfo? = manifests[id]
+    fun diffusionModel(id: String): DiffusionModelInfo? = diffusionModels[id]
 
     /** The minimum a photo/video swap needs: a detector, recognizer, a non-InSwapper swapper, and the content policy model. */
     val requiredReady: Boolean
@@ -61,10 +63,15 @@ class RemoteCatalog(context: Context) {
             client = newClient
             connectedTo = ep
             manifests = info.models.associateBy { it.id }
+            // Best-effort: fetchDiffusionInfo() never throws (see its own doc), so a box with no diffusion tier
+            // installed (setup_diffusion.sh never run) just contributes an empty map here, same as if those model
+            // ids simply weren't in diffusion_manifest.yaml — never fails the overall connect().
+            diffusionModels = newClient.fetchDiffusionInfo().associateBy { it.id }
             resyncMarkers()
             setStatus(ServerStatus.Connected(info))
         } catch (t: Throwable) {
             manifests = emptyMap()
+            diffusionModels = emptyMap()
             resyncMarkers()
             setStatus(ServerStatus.Failed(describeFailure(t)))
         }
@@ -73,6 +80,7 @@ class RemoteCatalog(context: Context) {
     fun disconnect() {
         client?.close(); client = null; connectedTo = null
         manifests = emptyMap()
+        diffusionModels = emptyMap()
         resyncMarkers()
         setStatus(ServerStatus.Disconnected)
     }
@@ -82,6 +90,7 @@ class RemoteCatalog(context: Context) {
     private fun resyncMarkers() {
         markerDir.listFiles()?.forEach { it.delete() }
         manifests.keys.forEach { File(markerDir, "$it.marker").createNewFile() }
+        diffusionModels.keys.forEach { File(markerDir, "$it.marker").createNewFile() }
     }
 
     private fun describeFailure(t: Throwable): String = when {

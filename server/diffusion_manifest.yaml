@@ -1,0 +1,69 @@
+# Catalog for the *diffusion* swap backends — a separate, opt-in tier of swapper above the ONNX models in
+# models_manifest.yaml. These are genuinely different technology (multi-step or distilled denoising diffusion
+# pipelines built on `diffusers`, not a single onnxruntime `run()` call), so they live in their own process
+# (diffusion_app/, its own venv, see server/setup_diffusion.sh) and their own wire protocol: plain
+# multipart/form-data image bytes in, image bytes out — see diffusion_app/main.py's module docstring. The Android
+# client mirrors these ids in ModelIds.DIFFUSION_SWAPPERS (core/.../Engine.kt) the same way it mirrors
+# models_manifest.yaml's ids in ModelIds.SWAPPERS, and only offers one once the connected server's
+# /v1/diffusion/health lists it — same "never hardcode availability" rule as the ONNX catalog.
+#
+# backend: the diffusion_app/backends/ module that implements this id (base.DiffusionSwapBackend subclass)
+# shares_base_with: another id in this file whose base checkpoint this one reuses, so the weight downloader and the
+#   backend registry both know to load the shared pipeline once and hang a second adapter off it, instead of paying
+#   for (and downloading) a second multi-GB base checkpoint.
+# approx_vram_gb / approx_disk_gb: planning numbers for setup_diffusion.sh's device-assignment prompt and the
+#   Android UI's "needs a beefy server" hint — not read by the backend itself at inference time.
+
+backends:
+  - id: instantid_sdxl
+    display_name: InstantID (SDXL)
+    backend: instantid
+    role: swapper
+    base_model: stabilityai/stable-diffusion-xl-base-1.0
+    weights:
+      - repo: InstantX/InstantID
+        files: [ip-adapter.bin, ControlNetModel/config.json, ControlNetModel/diffusion_pytorch_model.safetensors]
+    license: Apache-2.0 (InstantID weights) + OpenRAIL++ (SDXL base — permits commercial use)
+    approx_vram_gb: 14
+    approx_disk_gb: 8
+    notes: >
+      IP-Adapter + ControlNet identity injection on SDXL. Single forward pass per step (no custom inpainting mask
+      pipeline needed), good identity fidelity at speed; the fastest of the three to stand up and currently the
+      default recommendation.
+
+  - id: pulid_sdxl
+    display_name: PuLID (SDXL)
+    backend: pulid
+    role: swapper
+    base_model: stabilityai/stable-diffusion-xl-base-1.0
+    shares_base_with: instantid_sdxl
+    weights:
+      - repo: guozinan/PuLID
+        files: [pulid_sdxl_v1.1.safetensors]
+    license: Apache-2.0 (PuLID weights) + OpenRAIL++ (SDXL base)
+    approx_vram_gb: 14
+    approx_disk_gb: 1
+    notes: >
+      Lightning/ID-adapter style identity encoder, trained with a contrastive alignment loss for less identity
+      drift than vanilla IP-Adapter on hard poses. Reuses instantid_sdxl's SDXL base checkpoint (shares_base_with),
+      so once that's downloaded this adds only its own ~1GB adapter weights.
+
+  - id: reface_sd14
+    display_name: REFace (SD 1.4 inpainting)
+    backend: reface
+    role: swapper
+    base_model: CompVis/stable-diffusion-v1-4
+    weights:
+      - repo: Sanoojan/REFace
+        files: [last.ckpt]
+      - url: https://github.com/italojs/facial-landmarks-recognition/raw/master/shape_predictor_68_face_landmarks.dat
+        filename: shape_predictor_68_face_landmarks.dat
+    license: MIT (code) — checkpoint trained on CelebAMask-HQ; upstream README states non-commercial / research use
+      only for the trained weights. Gate this backend behind a visible notice before use; do not ship it on as a
+      silent default the way the other two are.
+    approx_vram_gb: 10
+    approx_disk_gb: 9
+    notes: >
+      True diffusion-inpainting face swap (9-channel UNet) rather than an IP-Adapter identity injection — a
+      genuinely different approach/quality character from the other two, worth offering as a third option, but
+      carries a non-commercial weight license the other two don't.

@@ -4,6 +4,8 @@ uvicorn[standard]>=0.30,<1.0
 numpy>=1.26,<3.0
 PyYAML>=6.0,<7.0
 requests>=2.31,<3.0
+httpx>=0.27,<1.0  # /v1/diffusion/{path} proxy route in app/main.py only; see diffusion_app/requirements.txt for
+                  # the diffusion server's own (much heavier) dependency set, installed into a separate venv
 
 # onnxruntime-gpu is intentionally NOT pinned here: setup_server.sh picks the exact wheel (and CUDA/cuDNN build)
 # that matches the detected driver + CUDA toolkit version, and TensorRT support requires the GPU-and-TensorRT

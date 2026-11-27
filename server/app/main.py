@@ -22,12 +22,19 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from . import catalog, tensor_wire
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .inference import Dispatcher, DeviceWorker, ModelNotFoundError
+
+# Loopback address of the diffusion server (diffusion_app/main.py) — a separate process/venv (torch/diffusers vs
+# this process's onnxruntime-gpu) that the /v1/diffusion/{path} route below proxies into. Not read from
+# server_config.yaml: it's always loopback-only by design (see diffusion_app/config.py's DiffusionConfig.host
+# docstring), so there's nothing for an operator to configure here.
+DIFFUSION_UPSTREAM = "http://127.0.0.1:8444"
 
 VERSION = "1.0.0"
 
@@ -74,7 +81,12 @@ async def lifespan(app: FastAPI):
     state["cfg"] = cfg
     state["entries_by_id"] = entries_by_id
     state["dispatcher"] = dispatcher
+    # No connection attempt happens here — the diffusion server may not even be installed on a box that only
+    # wants the ONNX swappers (setup_diffusion.sh is optional and separate from setup_server.sh). A long timeout
+    # is fine on the request path too since diffusion inference itself is the slow part by an order of magnitude.
+    state["diffusion_http"] = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0))
     yield
+    await state["diffusion_http"].aclose()
     state.clear()
 
 
@@ -134,3 +146,44 @@ async def infer(model_id: str, request: Request):
     out = io.BytesIO()
     tensor_wire.write_map(out, outputs)
     return Response(content=out.getvalue(), media_type="application/octet-stream")
+
+
+@app.api_route("/v1/diffusion/{path:path}", methods=["GET", "POST"])
+async def diffusion_proxy(path: str, request: Request):
+    """
+    Transparent reverse proxy into the diffusion server (diffusion_app/main.py, port 8444, loopback-only) so the
+    Android client and the Cloudflare Tunnel only ever need the one host:port they already have for /v1/health and
+    /v1/infer/*. Auth is intentionally NOT re-checked here (no `Depends(require_auth)` on this route): the
+    diffusion server verifies the forwarded Authorization header itself against the same api_key (see its own
+    require_auth), so this route would otherwise be checking the same bearer token twice for no benefit — the one
+    thing worth keeping in mind is that this means a request malformed enough to dodge FastAPI's own routing here
+    would still have to clear the diffusion server's own auth check to do anything, same as a direct request would.
+
+    Streams the body in both directions rather than buffering it whole in memory first: request bodies here are
+    multipart image uploads, which can be tens of megabytes, and the ONNX server's own event loop is also serving
+    time-sensitive /v1/infer/* traffic concurrently.
+    """
+    client: httpx.AsyncClient = state["diffusion_http"]
+    upstream_req = client.build_request(
+        request.method, f"{DIFFUSION_UPSTREAM}/v1/diffusion/{path}",
+        params=request.query_params, headers=_forwarded_headers(request), content=request.stream(),
+    )
+    try:
+        upstream_resp = await client.send(upstream_req, stream=True)
+    except httpx.ConnectError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "diffusion server isn't running on this box (see setup_diffusion.sh)"},
+        )
+    return Response(
+        content=await upstream_resp.aread(),
+        status_code=upstream_resp.status_code,
+        media_type=upstream_resp.headers.get("content-type"),
+    )
+
+
+def _forwarded_headers(request: Request) -> dict:
+    # Forward everything except hop-by-hop / host-identifying headers that would otherwise describe the wrong
+    # connection (this one, to the proxy, rather than the upstream one httpx is about to open itself).
+    skip = {"host", "content-length", "connection", "transfer-encoding"}
+    return {k: v for k, v in request.headers.items() if k.lower() not in skip}
