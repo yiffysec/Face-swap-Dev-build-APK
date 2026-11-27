@@ -37,12 +37,28 @@ private val OCTET_STREAM = "application/octet-stream".toMediaType()
  * a domain a public CA would issue for). Equivalent in spirit to pinning "whatever cert the box I just set up
  * presents" – acceptable because the user typed in the IP themselves, not because the network path is assumed safe.
  * Prefer a real certificate (e.g. via `--domain` + Let's Encrypt, see server/README.md) when the server has one.
+ *
+ * NOT used for a Cloudflare Tunnel address (`*.trycloudflare.com`, or any other public hostname): Cloudflare's edge
+ * terminates real, publicly-trusted TLS for those, so [RemoteClient] validates that connection normally instead of
+ * bypassing trust – see [looksLikeSelfSignedTarget].
  */
 private object TrustAnyCert : X509TrustManager {
     override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
     override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
     override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
 }
+
+private val IPV4_LITERAL = Regex("""^\d{1,3}(\.\d{1,3}){3}$""")
+
+/**
+ * True for a bare LAN IP or a `.local`/`localhost` address – the cases `setup_server.sh` only ever has a
+ * self-signed cert for, since no public CA will issue a certificate for an IP literal or a private hostname.
+ * False for anything else, including a Cloudflare Tunnel's `*.trycloudflare.com` hostname or a `--domain` the
+ * operator pointed Let's Encrypt at – both present a real, CA-issued certificate that should be validated
+ * normally rather than trusted unconditionally.
+ */
+private fun looksLikeSelfSignedTarget(host: String): Boolean =
+    host == "localhost" || host.endsWith(".local") || IPV4_LITERAL.matches(host) || host.contains(':') // IPv6 literal
 
 /** Thin HTTP client for the custom inference backend. One instance per connected [ServerEndpoint]. */
 class RemoteClient(private val endpoint: ServerEndpoint) {
@@ -52,11 +68,13 @@ class RemoteClient(private val endpoint: ServerEndpoint) {
         .writeTimeout(90, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .apply {
-            if (endpoint.tls) {
+            if (endpoint.tls && looksLikeSelfSignedTarget(endpoint.host)) {
                 val sslContext = SSLContext.getInstance("TLS").apply { init(null, arrayOf(TrustAnyCert), SecureRandom()) }
                 sslSocketFactory(sslContext.socketFactory, TrustAnyCert)
                 hostnameVerifier { _, _ -> true }
             }
+            // Else: a public hostname (Cloudflare Tunnel, a --domain host) – use OkHttp's default system trust
+            // store, which correctly validates the real certificate Cloudflare's edge (or Let's Encrypt) presents.
         }
         .build()
 

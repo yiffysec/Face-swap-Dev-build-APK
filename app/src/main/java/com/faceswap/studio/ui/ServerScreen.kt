@@ -27,6 +27,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
@@ -83,6 +86,22 @@ private fun ServerConnectionForm(vm: AppViewModel) {
     val status by vm.serverStatus.collectAsState()
     fun up(t: (com.faceswap.studio.data.AppSettings) -> com.faceswap.studio.data.AppSettings) = vm.updateSettings(t)
 
+    var pasteValue by remember { mutableStateOf("") }
+    var pasteError by remember { mutableStateOf(false) }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = pasteValue, onValueChange = { pasteValue = it; pasteError = false },
+            label = { Text("Paste address from setup_server.sh") },
+            placeholder = { Text("https://word-word.trycloudflare.com or 192.168.1.50:8443") },
+            singleLine = true, isError = pasteError, modifier = Modifier.weight(1f),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+        )
+        OutlinedButton(onClick = {
+            pasteError = pasteValue.isNotBlank() && !vm.applyPastedServerAddress(pasteValue)
+        }) { Text("Fill in") }
+    }
+    if (pasteError) Note("Couldn't parse that address – fill in host/port below by hand instead.", color = Warn)
+    Spacer(Modifier.height(8.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             value = s.serverHost, onValueChange = { up { st -> st.copy(serverHost = it) } },

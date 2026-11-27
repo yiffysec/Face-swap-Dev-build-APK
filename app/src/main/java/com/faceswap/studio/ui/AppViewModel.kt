@@ -162,6 +162,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Fills in host/port/TLS from one pasted address, the same shape `setup_server.sh` prints at the end –
+     * either a bare `LAN address` (`192.168.1.50:8443`) or the full `https://<words>.trycloudflare.com` Cloudflare
+     * Tunnel URL (no port – defaults to 443). Returns false (and leaves settings untouched) if [raw] doesn't parse
+     * as either shape, so the caller can show an error instead of silently doing nothing.
+     */
+    fun applyPastedServerAddress(raw: String): Boolean {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return false
+        val tls: Boolean
+        val rest: String
+        when {
+            trimmed.startsWith("https://") -> { tls = true; rest = trimmed.removePrefix("https://") }
+            trimmed.startsWith("http://") -> { tls = false; rest = trimmed.removePrefix("http://") }
+            else -> { tls = true; rest = trimmed } // no scheme pasted: assume TLS, matching the server's own default
+        }
+        val hostPort = rest.substringBefore('/')
+        val host = hostPort.substringBeforeLast(':').ifBlank { return false }
+        val portPart = if (hostPort.contains(':')) hostPort.substringAfterLast(':') else null
+        val port = portPart?.toIntOrNull() ?: if (tls) 443 else 80
+        if (port !in 1..65535) return false
+        updateSettings { it.copy(serverHost = host, serverPort = port, serverUseTls = tls) }
+        return true
+    }
+
     fun disconnectServer() = launch { a.engine.release(); remote.disconnect() }
 
     /** Short status for the header chip: backend mode + whether tuning ran (state – reading tuning results hits disk). */

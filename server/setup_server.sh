@@ -86,7 +86,11 @@ if command -v systemctl >/dev/null && systemctl list-units >/dev/null 2>&1; then
   HAS_SYSTEMD=1
 fi
 HAS_SUPERVISOR=0
-if command -v supervisorctl >/dev/null && [[ -d /etc/supervisor/conf.d ]] && supervisorctl status >/dev/null 2>&1; then
+# `supervisorctl status` itself is NOT a reachability check: its exit code reflects the worst state among all
+# configured programs, so it returns non-zero whenever anything is merely EXITED/STOPPED - completely normal and
+# common - not just when supervisord itself is unreachable. `supervisorctl pid` only talks to the supervisord RPC
+# server and prints its PID, so its exit code actually means "can I reach supervisord", which is what we want here.
+if command -v supervisorctl >/dev/null && [[ -d /etc/supervisor/conf.d ]] && supervisorctl pid >/dev/null 2>&1; then
   HAS_SUPERVISOR=1
 fi
 if [[ "$HAS_SYSTEMD" == "1" ]]; then
