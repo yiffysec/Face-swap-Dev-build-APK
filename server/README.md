@@ -15,9 +15,15 @@ sudo ./setup_server.sh
 ```
 
 This detects your hardware, writes a performance plan (`server_config.yaml`), downloads the default model set,
-generates a self-signed TLS cert, installs + starts a `systemd` service (`faceswapd`), and sets up a **Cloudflare
-Tunnel** for access from outside the LAN. At the end it prints both addresses and the API key to put into the app
-under **Settings → Processing → Remote server**.
+generates a self-signed TLS cert, installs + starts `faceswapd` as a background service, and sets up a
+**Cloudflare Tunnel** for access from outside the LAN. At the end it prints both addresses and the API key to put
+into the app under **Settings → Processing → Remote server**.
+
+`faceswapd` runs under whichever service manager actually works on the box: `systemd` on a normal VM/bare-metal
+host, `supervisord` on a container-based GPU rental box (vast.ai, RunPod, etc. — these usually have systemd
+present in the image but not actually running as PID 1, which this script detects rather than assumes), or a
+plain background process with a PID file if neither is available. Same for the Cloudflare Tunnel. See the comment
+block at the top of `setup_server.sh` for details.
 
 Useful flags:
 
@@ -128,8 +134,11 @@ server/
     plan.py               Hardware JSON -> server_config.yaml
   models_manifest.yaml    Same model ids/URLs as the Android app's ModelCatalog
   download_models.py      Fetches weights into models/
-  setup_server.sh          Orchestrates all of the above + systemd
-  systemd/faceswapd.service.template
+  setup_server.sh          Orchestrates all of the above + service install
+  systemd/faceswapd.service.template                       systemd units (normal VM/bare-metal hosts)
+  systemd/cloudflared-quicktunnel.service.template
+  supervisor/faceswapd.conf.template                        supervisord programs (container-based GPU rental boxes)
+  supervisor/cloudflared-quicktunnel.conf.template
 ```
 
 ## API

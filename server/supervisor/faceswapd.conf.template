@@ -1,0 +1,16 @@
+; supervisord program definition for faceswapd — used instead of the systemd unit on hosts where systemd isn't
+; PID 1 (most container-based GPU rental boxes: vast.ai, RunPod, etc. already run supervisord for their own
+; services). setup_server.sh fills in the placeholders and drops this into /etc/supervisor/conf.d/.
+[program:faceswapd]
+directory=__WORKDIR__
+command=__VENV__/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port __PORT__ --ssl-certfile __TLS_CERT__ --ssl-keyfile __TLS_KEY__ --workers 1
+environment=FSW_SERVER_CONFIG="__WORKDIR__/server_config.yaml"
+autostart=true
+autorestart=true
+startretries=10
+stopsignal=TERM
+stdout_logfile=__WORKDIR__/logs/faceswapd.out.log
+stderr_logfile=__WORKDIR__/logs/faceswapd.err.log
+stdout_logfile_maxbytes=10MB
+stderr_logfile_maxbytes=10MB
+; One worker process is intentional: Dispatcher coordinates GPU concurrency in-process (see app/inference.py).

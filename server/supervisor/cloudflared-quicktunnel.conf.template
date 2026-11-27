@@ -1,0 +1,14 @@
+; supervisord program definition for the Cloudflare Quick Tunnel, used instead of the systemd unit on hosts where
+; systemd isn't PID 1. See systemd/cloudflared-quicktunnel.service.template for the systemd equivalent and why
+; --no-tls-verify is safe here (origin is our own self-signed localhost cert; Cloudflare's edge still terminates
+; real, trusted TLS for the public address).
+[program:cloudflared-quicktunnel]
+command=__CLOUDFLARED__ tunnel --no-autoupdate --url https://localhost:__PORT__ --no-tls-verify
+autostart=true
+autorestart=true
+startretries=10
+stopsignal=TERM
+stdout_logfile=__WORKDIR__/logs/cloudflared.out.log
+stderr_logfile=__WORKDIR__/logs/cloudflared.err.log
+stdout_logfile_maxbytes=10MB
+stderr_logfile_maxbytes=10MB
