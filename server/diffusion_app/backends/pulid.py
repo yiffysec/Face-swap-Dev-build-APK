@@ -29,7 +29,10 @@ log = logging.getLogger("faceswapd.diffusion.pulid")
 
 PULID_REPO_URL = "https://github.com/ToTheBeginning/PuLID.git"
 PULID_WEIGHTS_REPO = "guozinan/PuLID"
-PULID_WEIGHTS_FILENAME = "pulid_sdxl_v1.1.safetensors"
+# No "sdxl" in the actual filename — that only appears in the repo's separate Flux-targeted file
+# (pulid_flux_v0.9.1.safetensors); this one is just "pulid_v1.1.safetensors". Must match diffusion_manifest.yaml's
+# pulid_sdxl entry's `files` list, which the setup/download step reads to know what to fetch.
+PULID_WEIGHTS_FILENAME = "pulid_v1.1.safetensors"
 
 
 def _ensure_pulid_repo(checkout_dir: Path) -> Path:

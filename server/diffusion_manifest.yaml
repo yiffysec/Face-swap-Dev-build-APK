@@ -39,7 +39,10 @@ backends:
     shares_base_with: instantid_sdxl
     weights:
       - repo: guozinan/PuLID
-        files: [pulid_sdxl_v1.1.safetensors]
+        # The repo's actual filename has no "sdxl" in it (that's only in the separate Flux-targeted file,
+        # pulid_flux_v0.9.1.safetensors, alongside it in the same repo) — confirmed against the repo's own file
+        # listing after the original pulid_sdxl_v1.1.safetensors name 404'd on download.
+        files: [pulid_v1.1.safetensors]
     license: Apache-2.0 (PuLID weights) + OpenRAIL++ (SDXL base)
     approx_vram_gb: 14
     approx_disk_gb: 1
