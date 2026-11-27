@@ -9,6 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.faceswap.core.Face
 import com.faceswap.core.FaceMapping
+import com.faceswap.core.ModelIds
 import com.faceswap.core.PolicyDecision
 import com.faceswap.core.RgbImage
 import com.faceswap.core.SourceFace
@@ -758,6 +759,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val mappings = buildMappings(st.setup)
         if (mappings.isEmpty()) { toast("Pick a source face first"); return }
         val s = settings.value
+        // Diffusion swappers (InstantID/PuLID/REFace) are multi-step SDXL/SD generations per face, several
+        // seconds each over the network, with no temporal-consistency conditioning between frames. Run one
+        // frame-by-frame over a video and the result is both impractically slow (minutes-to-hours for a short
+        // clip) and visibly flickery (every frame is an independent regeneration). Steer people back to a local
+        // ONNX swapper for video instead of letting the job run for a long time toward an unusable result.
+        if (s.swapperId in ModelIds.DIFFUSION_SWAPPERS) {
+            toast("${swapperLabel(s.swapperId)} is a diffusion model meant for single photos — it's too slow and flickers frame-to-frame on video. Pick a different swapper in Settings for video.")
+            return
+        }
         // previous render is replaced (Save copies it to the gallery) – the cache would otherwise grow by a video per run
         File(getApplication<Application>().cacheDir, "outputs").listFiles()?.filter { it.name.startsWith("faceswap_") && it.extension == "mp4" }?.forEach { it.delete() }
         val out = File(getApplication<Application>().cacheDir, "outputs/faceswap_${System.currentTimeMillis()}.mp4")

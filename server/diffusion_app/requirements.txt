@@ -14,14 +14,30 @@ huggingface_hub>=0.24,<1.0
 # torch/torchvision are intentionally NOT pinned here, same reasoning as onnxruntime-gpu in the ONNX server's
 # requirements.txt: setup_diffusion.sh installs the cu12x wheel matching the detected driver, from
 # download.pytorch.org's own index rather than PyPI, so pinning a version here would just get overridden anyway.
+#
+# triton IS pinned, unlike torch/torchvision above, for the opposite reason: left unpinned, transformers/accelerate
+# pull in whatever's newest on PyPI (seen: 3.9.0), which in turn depends on NVIDIA's new unsuffixed "nvidia-cublas"
+# package — a *different* package from the "nvidia-cublas-cu12" one torch's own cu121 install already satisfies,
+# built for the CUDA 13 generation, and several hundred MB by itself. None of these backends use torch.compile or
+# custom Triton kernels, so there's no upside to the newer version — pin it to the release torch 2.5.1+cu121 itself
+# expects, which stays within the cu12 package family torch already pulled in.
+triton==3.1.0
 
 diffusers>=0.30,<1.0
 transformers>=4.40,<5.0
 accelerate>=0.30,<2.0
 safetensors>=0.4,<1.0
-insightface>=0.7,<1.0           # instantid_sdxl: face detection + embedding (antelopev2)
+# insightfacex, not insightface: the official "insightface" package on PyPI has never published a single Linux
+# wheel (source dist only — https://pypi.org/project/insightface/), so `pip install insightface` always compiles
+# its Cython/C extensions from source. insightfacex (pypi.org/project/insightfacex/) is a maintained fork that
+# publishes real manylinux wheels (cp312 included) under the SAME import name — code still does
+# `import insightface` / `from insightface.app import FaceAnalysis` unchanged (see its own PyPI usage example).
+insightfacex>=0.7,<1.0           # instantid_sdxl: face detection + embedding (antelopev2)
 controlnet_aux>=0.0.7           # instantid_sdxl: auxiliary ControlNet preprocessing utilities
-dlib>=19.24                     # reface_sd14: face detection + 68-point landmarks (their own repo's dependency)
+# dlib-bin, not dlib: the real "dlib" sdist has no wheel for every Python/arch combo and falls back to compiling
+# its C++ sources with cmake — the slow step that was still running after 15+ minutes on setup. dlib-bin is the
+# same project repackaged as prebuilt wheels (still `import dlib` — no code changes needed anywhere that uses it).
+dlib-bin>=19.24                 # reface_sd14: face detection + 68-point landmarks (their own repo's dependency)
 omegaconf>=2.3,<3.0             # reface_sd14: REFace's ldm config loading (taming-transformers/latent-diffusion style)
 pytorch-lightning>=2.0,<3.0     # reface_sd14: their checkpoint's `ldm` package expects this at import time
 einops>=0.7,<1.0                # reface_sd14: ldm package dependency

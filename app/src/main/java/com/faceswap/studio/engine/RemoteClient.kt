@@ -172,7 +172,12 @@ class RemoteClient(private val endpoint: ServerEndpoint) {
     }
 
     private fun errorMessage(body: ResponseBody?): String? = runCatching {
-        JSONObject(body?.string() ?: return null).optString("error").takeIf { it.isNotBlank() }
+        // Routes that build their own JSONResponse (e.g. /v1/infer's 404/500, diffusion_proxy's 503) use {"error":
+        // ...}; routes that just raise FastAPI's HTTPException (auth failures, and the diffusion server's 404/422
+        // for an unknown model or an undetected face) serialize as {"detail": ...} instead – check both so neither
+        // shape falls back to a bare, unhelpful "server returned HTTP ###".
+        val j = JSONObject(body?.string() ?: return null)
+        (j.optString("error").takeIf { it.isNotBlank() } ?: j.optString("detail").takeIf { it.isNotBlank() })
     }.getOrNull()
 
     fun close() {

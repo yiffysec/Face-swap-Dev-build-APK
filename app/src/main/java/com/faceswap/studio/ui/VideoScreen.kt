@@ -38,6 +38,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.faceswap.core.FaceSelector
+import com.faceswap.core.ModelIds
 import com.faceswap.studio.ui.theme.Scrim
 
 @Composable
@@ -91,6 +92,9 @@ fun VideoScreen(vm: AppViewModel, adders: FaceAdders, nav: Navigator) {
             if (settings.videoEnhance) ToggleRow("Smart enhance", settings.smartEnhance, "Skip faces that are already as sharp as the original") { v -> vm.updateSettings { it.copy(smartEnhance = v) } }
             ToggleRow("Keep original audio", settings.keepAudio) { v -> vm.updateSettings { it.copy(keepAudio = v) } }
             Note("Swapper: ${vm.swapperLabel(settings.swapperId)} at native resolution · ${settings.videoWorkers} render workers" + if (settings.rootBoost && vm.rootAvailable) " · root boost" else "")
+            if (settings.swapperId in ModelIds.DIFFUSION_SWAPPERS) {
+                Note("${vm.swapperLabel(settings.swapperId)} is a diffusion model for single photos — running it per frame on a video is very slow and will flicker. Pick a different swapper in Settings.", color = MaterialTheme.colorScheme.error)
+            }
         }
 
         Spacer(Modifier.height(16.dp))
