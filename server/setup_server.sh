@@ -126,8 +126,20 @@ log "Detecting hardware"
 python3 setup/detect_hardware.py | tee /tmp/faceswapd_hardware.json
 
 if [[ -z "$API_KEY" ]]; then
-  API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-  log "Generated a random API key (save this — clients need it to connect)"
+  # Reuse whatever's already in server_config.yaml, if this isn't the first run — same reasoning as
+  # setup_diffusion.sh's own API-key step. Without this, re-running this script for any reason (picking up a
+  # bigger --models set, re-detecting hardware after a GPU change, etc.) would silently rotate the key out from
+  # under every client that already has the old one pasted into its Settings screen, breaking their connection
+  # with no indication of why beyond an HTTP 401.
+  if [[ -f server_config.yaml ]]; then
+    API_KEY="$(python3 -c "import yaml; print((yaml.safe_load(open('server_config.yaml')) or {}).get('api_key') or '')" 2>/dev/null || true)"
+  fi
+  if [[ -z "$API_KEY" ]]; then
+    API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    log "Generated a random API key (save this — clients need it to connect)"
+  else
+    log "Reusing the existing API key from server_config.yaml"
+  fi
 fi
 
 TLS_CERT=""
