@@ -135,8 +135,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val adpfSupported get() = a.perf.adpfSupported
     val qnnAvailable: Boolean by lazy { com.faceswap.studio.engine.QnnPlugin.available(app) }
 
-    fun modelTitle(id: String) = ModelCatalog.byId(id)?.title ?: id
+    // Diffusion ids (instantid_sdxl, pulid_sdxl, reface_sd14) have no ModelCatalog entry — they're never bundled
+    // or downloaded as a local .onnx (see ModelIds.DIFFUSION_SWAPPERS / RemoteCatalog), so ModelCatalog.byId would
+    // just fall through to the raw id. The connected server's /v1/diffusion/health already hands us a friendly
+    // display_name per backend (RemoteCatalog.diffusionModel), so prefer that before falling back to the id.
+    fun modelTitle(id: String) = ModelCatalog.byId(id)?.title ?: remote.diffusionModel(id)?.displayName ?: id
     fun swapperLabel(id: String) = modelTitle(id).removeSuffix(" 128")
+    /** License/notes line for a diffusion swapper chip's subtitle, e.g. non-commercial gating on reface_sd14. */
+    fun diffusionNotes(id: String): String? = remote.diffusionModel(id)?.let { info ->
+        listOf(info.license, info.notes).filter { it.isNotBlank() }.joinToString(" — ").ifBlank { null }
+    }
 
     // ---------------------------------------------------------------- processing mode (local device / remote server)
     val remote = a.remote
