@@ -15,13 +15,15 @@ huggingface_hub>=0.24,<1.0
 # requirements.txt: setup_diffusion.sh installs the cu12x wheel matching the detected driver, from
 # download.pytorch.org's own index rather than PyPI, so pinning a version here would just get overridden anyway.
 #
-# triton IS pinned, unlike torch/torchvision above, for the opposite reason: left unpinned, transformers/accelerate
-# pull in whatever's newest on PyPI (seen: 3.9.0), which in turn depends on NVIDIA's new unsuffixed "nvidia-cublas"
-# package — a *different* package from the "nvidia-cublas-cu12" one torch's own cu121 install already satisfies,
-# built for the CUDA 13 generation, and several hundred MB by itself. None of these backends use torch.compile or
-# custom Triton kernels, so there's no upside to the newer version — pin it to the release torch 2.5.1+cu121 itself
-# expects, which stays within the cu12 package family torch already pulled in.
-triton==3.1.0
+# triton IS constrained, unlike torch/torchvision above, for the opposite reason: left unpinned, transformers/
+# accelerate pull in whatever's newest on PyPI (seen: 3.9.0), which in turn depends on NVIDIA's new unsuffixed
+# "nvidia-cublas" package — a *different* package from the "nvidia-cublas-cuNN" one torch's own install already
+# satisfies, built for the CUDA 13 generation, and several hundred MB by itself. None of these backends use
+# torch.compile or custom Triton kernels, so there's no upside to the newer version. Not pinned to an exact
+# version (torch itself is unpinned above — whichever release the cu128 index currently serves — and different
+# torch releases want different exact triton builds), just capped below the release that introduced the CUDA-13
+# dependency, so pip still picks whatever triton that resolved torch version actually wants.
+triton>=3.0,<3.5
 
 diffusers>=0.30,<1.0
 transformers>=4.40,<5.0
