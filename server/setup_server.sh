@@ -9,6 +9,8 @@
 #   sudo ./setup_server.sh --port 9443 --api-key mykey
 #   sudo ./setup_server.sh --domain infer.example.com   # use Let's Encrypt instead of a self-signed cert
 #   sudo ./setup_server.sh --no-service                 # set everything up but don't install/start systemd
+#   sudo ./setup_server.sh --no-cloudflared             # skip the Cloudflare Tunnel (LAN/IP access only)
+#   sudo ./setup_server.sh --cloudflared-token <TOKEN>  # use a stable named Cloudflare Tunnel instead of a quick one
 #
 # Requires: a Debian/Ubuntu or RHEL/Fedora host with an NVIDIA driver already installed (or none, for CPU-only),
 # root (for apt/dnf + systemd), and outbound internet access to Hugging Face / PyPI / the CUDA package repos.
@@ -22,6 +24,8 @@ PORT=8443
 API_KEY=""
 DOMAIN=""
 INSTALL_SERVICE=1
+WANT_CLOUDFLARED=1
+CLOUDFLARE_TOKEN=""
 VENV_DIR="$SERVER_DIR/.venv"
 
 while [[ $# -gt 0 ]]; do
@@ -31,6 +35,8 @@ while [[ $# -gt 0 ]]; do
     --api-key) API_KEY="$2"; shift 2 ;;
     --domain) DOMAIN="$2"; shift 2 ;;
     --no-service) INSTALL_SERVICE=0; shift ;;
+    --no-cloudflared) WANT_CLOUDFLARED=0; shift ;;
+    --cloudflared-token) CLOUDFLARE_TOKEN="$2"; shift 2 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -142,19 +148,85 @@ else
   echo "  source $VENV_DIR/bin/activate && cd $SERVER_DIR && uvicorn app.main:app --host 0.0.0.0 --port $PORT --ssl-certfile $TLS_CERT --ssl-keyfile $TLS_KEY"
 fi
 
+# --- 6. Cloudflare Tunnel (secondary/remote access) ------------------------------------------------------
+# Gives the server a public address reachable from outside the LAN without port-forwarding or a static IP —
+# handy for a phone on mobile data or a different network. The LAN address above still works as the primary,
+# lower-latency path when the phone is on the same network; the tunnel is the fallback for everywhere else.
+CLOUDFLARE_URL=""
+if [[ "$WANT_CLOUDFLARED" == "1" ]] && command -v systemctl >/dev/null; then
+  log "Setting up Cloudflare Tunnel for remote access"
+  CLOUDFLARED_BIN="$(command -v cloudflared || true)"
+  if [[ -z "$CLOUDFLARED_BIN" ]]; then
+    case "$(uname -m)" in
+      x86_64) CF_ARCH="amd64" ;;
+      aarch64|arm64) CF_ARCH="arm64" ;;
+      armv7l|armv6l) CF_ARCH="arm" ;;
+      *) CF_ARCH="" ;;
+    esac
+    if [[ -n "$CF_ARCH" ]]; then
+      curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH" \
+        -o /usr/local/bin/cloudflared
+      chmod +x /usr/local/bin/cloudflared
+      CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
+    else
+      log "Unrecognized CPU architecture ($(uname -m)) — skipping Cloudflare Tunnel, LAN/IP access still works"
+    fi
+  fi
+
+  if [[ -n "$CLOUDFLARED_BIN" ]]; then
+    if [[ -n "$CLOUDFLARE_TOKEN" ]]; then
+      # Stable named tunnel: hostname + ingress (which local port it forwards to) are configured once in the
+      # Cloudflare Zero Trust dashboard when the tunnel is created there; this just runs the connector.
+      log "Installing the named Cloudflare Tunnel connector (stable hostname, configured in your Cloudflare dashboard)"
+      "$CLOUDFLARED_BIN" service uninstall >/dev/null 2>&1 || true
+      "$CLOUDFLARED_BIN" service install "$CLOUDFLARE_TOKEN"
+      systemctl enable cloudflared >/dev/null 2>&1 || true
+      systemctl restart cloudflared
+      CLOUDFLARE_URL="(the hostname you set for this tunnel in the Cloudflare Zero Trust dashboard)"
+    else
+      # Quick Tunnel: zero-config, no Cloudflare account needed, but the *.trycloudflare.com hostname is
+      # randomly generated and changes every time the service restarts — fine for personal/testing use, not a
+      # stable production address. Use --cloudflared-token for that instead (see server/README.md).
+      log "Starting a Cloudflare Quick Tunnel (ephemeral public address, no account needed)"
+      sed -e "s#__CLOUDFLARED__#$CLOUDFLARED_BIN#g" -e "s#__PORT__#$PORT#g" \
+        systemd/cloudflared-quicktunnel.service.template > /etc/systemd/system/cloudflared-quicktunnel.service
+      systemctl daemon-reload
+      systemctl enable cloudflared-quicktunnel >/dev/null
+      systemctl restart cloudflared-quicktunnel
+      for _ in $(seq 1 15); do
+        CLOUDFLARE_URL="$(journalctl -u cloudflared-quicktunnel -n 100 --no-pager 2>/dev/null \
+          | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' | tail -1 || true)"
+        [[ -n "$CLOUDFLARE_URL" ]] && break
+        sleep 1
+      done
+      if [[ -n "$CLOUDFLARE_URL" ]]; then
+        echo "$CLOUDFLARE_URL" > cloudflared_url.txt
+      else
+        log "Cloudflare Tunnel didn't report a hostname yet — check: journalctl -u cloudflared-quicktunnel -n 50"
+      fi
+    fi
+  fi
+else
+  log "Skipping Cloudflare Tunnel (--no-cloudflared or systemctl unavailable)"
+fi
+
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 cat <<EOF
 
 ================================================================================
  FaceSwap inference server is set up.
 
-   Address:   ${HOST_IP:-<this-machine-ip>}:$PORT  (TLS $( [[ -n "$DOMAIN" ]] && echo "via Let's Encrypt for $DOMAIN" || echo "self-signed" ))
-   API key:   $API_KEY
+   LAN address:      ${HOST_IP:-<this-machine-ip>}:$PORT  (TLS $( [[ -n "$DOMAIN" ]] && echo "via Let's Encrypt for $DOMAIN" || echo "self-signed" ))
+$( [[ -n "$CLOUDFLARE_URL" ]] && echo "   Remote address:   $CLOUDFLARE_URL  (via Cloudflare Tunnel, works off-LAN)" )
+   API key:          $API_KEY
 
- In the Android app: Settings → Processing → Remote server, enter the host/IP, port $PORT,
- enable TLS, and paste the API key above.
+ In the Android app: Settings → Processing → Remote server. Use the LAN address when the phone is on the
+ same network (lower latency); use the remote address for everywhere else. Paste the API key either way.
+$( [[ -n "$CLOUDFLARE_URL" && -z "$CLOUDFLARE_TOKEN" ]] && echo "
+ Note: the remote address is a Quick Tunnel - it changes if the tunnel service restarts. Re-check it with
+ ./get_cloudflare_url.sh, or re-run with --cloudflared-token <token> for a stable hostname instead." )
 
  Config file: $SERVER_DIR/server_config.yaml   (re-run setup/plan.py after hardware changes)
- Logs:        journalctl -u faceswapd -f
+ Logs:        journalctl -u faceswapd -f   |   journalctl -u cloudflared-quicktunnel -f
 ================================================================================
 EOF

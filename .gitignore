@@ -16,5 +16,6 @@ server/server_config.yaml
 server/tls/
 server/trt_cache/
 server/*.part
+server/cloudflared_url.txt
 __pycache__/
 *.pyc

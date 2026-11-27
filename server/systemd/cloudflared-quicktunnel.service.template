@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare Quick Tunnel for FaceSwap Studio inference server
+After=network-online.target faceswapd.service
+Wants=network-online.target
+Requires=faceswapd.service
+
+[Service]
+Type=simple
+# --no-tls-verify: the origin is our own server on localhost, presenting the self-signed cert setup_server.sh
+# generated (or a real one if --domain was used - still fine to skip verifying localhost's own identity here).
+# Cloudflare's edge still terminates real, trusted TLS for the public https://*.trycloudflare.com address.
+ExecStart=__CLOUDFLARED__ tunnel --no-autoupdate --url https://localhost:__PORT__ --no-tls-verify
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

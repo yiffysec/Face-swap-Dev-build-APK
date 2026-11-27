@@ -15,8 +15,9 @@ sudo ./setup_server.sh
 ```
 
 This detects your hardware, writes a performance plan (`server_config.yaml`), downloads the default model set,
-generates a self-signed TLS cert, and installs + starts a `systemd` service (`faceswapd`). At the end it prints
-the address and API key to put into the app under **Settings → Processing → Remote server**.
+generates a self-signed TLS cert, installs + starts a `systemd` service (`faceswapd`), and sets up a **Cloudflare
+Tunnel** for access from outside the LAN. At the end it prints both addresses and the API key to put into the app
+under **Settings → Processing → Remote server**.
 
 Useful flags:
 
@@ -25,10 +26,39 @@ sudo ./setup_server.sh --models full              # also fetch extra swappers/en
 sudo ./setup_server.sh --port 9443 --api-key xyz   # pick your own port/key instead of a random one
 sudo ./setup_server.sh --domain infer.example.com  # real cert via Let's Encrypt instead of self-signed
 sudo ./setup_server.sh --no-service                # set everything up, print the run command, skip systemd
+sudo ./setup_server.sh --no-cloudflared             # LAN/IP access only, skip the tunnel entirely
+sudo ./setup_server.sh --cloudflared-token <TOKEN>  # stable named tunnel instead of a quick one (see below)
 ```
 
 Re-run it any time — every step is idempotent. If you add or remove a GPU, re-run `setup/plan.py` (see below) to
 regenerate `server_config.yaml` without re-downloading models.
+
+## Remote access via Cloudflare Tunnel
+
+The LAN address (`<ip>:<port>`) only works when the phone is on the same network as the server. For everywhere
+else — mobile data, a different Wi-Fi — `setup_server.sh` also sets up a [Cloudflare
+Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) by default, giving the
+server a second, public address with no port-forwarding and no static IP needed.
+
+Two modes:
+
+- **Quick Tunnel** (default): zero-config, no Cloudflare account needed. `cloudflared` is downloaded automatically
+  and run as a `cloudflared-quicktunnel` systemd service, which prints a `https://<random-words>.trycloudflare.com`
+  address — that's what setup_server.sh prints at the end, and what re-appears each time you run
+  `./get_cloudflare_url.sh`. **The hostname changes every time this service restarts** (reboot, crash, manual
+  restart) — fine for personal use/testing, but re-check it with `./get_cloudflare_url.sh` after any restart, and
+  update the app if it changed.
+- **Named Tunnel** (`--cloudflared-token <token>`): a stable hostname that doesn't change. Create the tunnel once
+  in the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com/) (Networks → Tunnels → Create a
+  tunnel), configure its public hostname and point its ingress rule at `https://localhost:<port>` (same port
+  you're passing to `setup_server.sh`), then copy the tunnel's token and pass it here. Use this if you want the
+  address in the app to stay valid long-term, e.g. for always-on remote access.
+
+Either way, the app still needs the API key, and it still trusts whatever TLS certificate it finds (real,
+Cloudflare-terminated TLS over the tunnel; self-signed over the LAN — see `RemoteClient.kt`'s `TrustAnyCert`).
+
+To remove the tunnel later: `systemctl disable --now cloudflared-quicktunnel` (quick tunnel) or `cloudflared
+service uninstall` (named tunnel).
 
 ## How hardware detection works
 
